@@ -1,0 +1,55 @@
+%%{init: {'theme': 'dark', 'themeVariables': { 'primaryColor': '#2d3748', 'primaryTextColor': '#e2e8f0', 'primaryBorderColor': '#4a5568', 'lineColor': '#63b3ed', 'secondaryColor': '#1a202c', 'tertiaryColor': '#2d3748', 'edgeLabelBackground': '#1a202c', 'fontSize': '13px' }}}%%
+
+flowchart LR
+    subgraph Taskbox["📬 Taskbox"]
+        T1["Task #41
+from pm"]
+        T2["Task #42
+from pm"]
+        T3["Task #41
+back from qa"]
+    end
+
+    subgraph PY["🐍 py — Claude Code process"]
+        direction TB
+        CMD1["/resume py-issue-41"]
+        CMD2["/resume py-issue-42"]
+        CMD3["/resume py-issue-41"]
+    end
+
+    subgraph Disk["💾 Sessions on disk"]
+        direction TB
+        S1["py-issue-41
+full context: files read,
+edits made, test results"]
+        S2["py-issue-42
+separate context:
+different feature"]
+    end
+
+    T1 -->|"supervisor
+send-keys"| CMD1
+    CMD1 -->|"creates"| S1
+
+    T2 -->|"new task
+arrives"| CMD2
+    CMD2 -->|"creates"| S2
+    CMD2 -.->|"#41 preserved
+on disk"| S1
+
+    T3 -->|"qa found bug
+back to py"| CMD3
+    CMD3 -->|"resumes
+full context"| S1
+
+    style Taskbox fill:#1a202c,stroke:#4a5568,stroke-width:1px
+    style PY fill:#1c2a3a,stroke:#63b3ed,stroke-width:2px
+    style Disk fill:#1a365d,stroke:#63b3ed,stroke-width:1px
+    style S1 fill:#22543d,stroke:#68d391,stroke-width:1px,color:#c6f6d5
+    style S2 fill:#744210,stroke:#ecc94b,stroke-width:1px,color:#fefcbf
+    style CMD1 fill:#2d3748,stroke:#63b3ed,stroke-width:1px
+    style CMD2 fill:#2d3748,stroke:#63b3ed,stroke-width:1px
+    style CMD3 fill:#2d3748,stroke:#63b3ed,stroke-width:1px
+    style T1 fill:#2d3748,stroke:#a0aec0,stroke-width:1px
+    style T2 fill:#2d3748,stroke:#a0aec0,stroke-width:1px
+    style T3 fill:#2d3748,stroke:#a0aec0,stroke-width:1px

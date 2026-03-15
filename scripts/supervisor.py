@@ -1,0 +1,819 @@
+#!/usr/bin/env python3
+"""Octobots Supervisor — manages Claude Code workers in tmux with a Rich TUI.
+
+Replaces supervisor.sh with a proper Python implementation.
+
+Usage:
+  python octobots/scripts/supervisor.py
+  python octobots/scripts/supervisor.py --interval 10
+  python octobots/scripts/supervisor.py --workers python-dev js-dev
+"""
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import os
+import shutil
+import sqlite3
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+from rich.console import Console
+from rich.layout import Layout
+from rich.live import Live
+from rich.panel import Panel
+from rich.prompt import Prompt
+from rich.table import Table
+from rich.text import Text
+from rich import box
+
+# ── Paths ───────────────────────────────────────────────────────────────────
+
+SCRIPT_DIR = Path(__file__).parent
+OCTOBOTS_DIR = SCRIPT_DIR.parent
+PROJECT_DIR = Path.cwd()
+RUNTIME_DIR = PROJECT_DIR / ".octobots"
+RELAY_SCRIPT = OCTOBOTS_DIR / "skills" / "taskbox" / "scripts" / "relay.py"
+BASE_ROLES = OCTOBOTS_DIR / "roles"
+LOCAL_ROLES = RUNTIME_DIR / "roles"
+
+TMUX_SESSION = "octobots"
+EXCLUDED_ROLES = {"scout"}
+WORKTREE_ROLES = {"python-dev", "js-dev", "qa-engineer"}
+
+# Role theming — colors and display names for tmux panes
+ROLE_THEME: dict[str, dict[str, str]] = {
+    "project-manager": {"color": "colour213", "icon": "📋", "name": "pm"},
+    "python-dev":      {"color": "colour117", "icon": "🐍", "name": "py"},
+    "js-dev":          {"color": "colour220", "icon": "⚡", "name": "js"},
+    "qa-engineer":     {"color": "colour156", "icon": "🧪", "name": "qa"},
+    "ba":              {"color": "colour183", "icon": "📝", "name": "ba"},
+    "tech-lead":       {"color": "colour209", "icon": "🏗️", "name": "tl"},
+    "scout":           {"color": "colour252", "icon": "🔍", "name": "scout"},
+}
+
+console = Console()
+
+
+# ── .env.octobots loader ────────────────────────────────────────────────────
+
+def load_env() -> None:
+    for env_path in [OCTOBOTS_DIR / ".env.octobots", PROJECT_DIR / ".env.octobots"]:
+        if env_path.is_file():
+            for line in env_path.read_text().splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                key, value = key.strip(), value.strip().strip("\"'")
+                if key and key not in os.environ:
+                    os.environ[key] = value
+
+
+# ── Taskbox ─────────────────────────────────────────────────────────────────
+
+class Taskbox:
+    def __init__(self, db_path: Path):
+        self.db_path = db_path
+
+    def _db(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(str(self.db_path))
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def init(self) -> None:
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        conn = self._db()
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS messages (
+                id TEXT PRIMARY KEY, sender TEXT NOT NULL, recipient TEXT NOT NULL,
+                content TEXT NOT NULL, response TEXT DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at REAL NOT NULL, updated_at REAL NOT NULL
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_inbox ON messages(recipient, status)")
+        conn.commit()
+        conn.close()
+
+    def inbox(self, role: str, limit: int = 1) -> list[dict]:
+        conn = self._db()
+        rows = conn.execute(
+            "SELECT id, sender, content, created_at FROM messages "
+            "WHERE recipient = ? AND status = 'pending' ORDER BY created_at ASC LIMIT ?",
+            (role, limit),
+        ).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+
+    def claim(self, msg_id: str) -> bool:
+        conn = self._db()
+        cur = conn.execute(
+            "UPDATE messages SET status='processing', updated_at=? WHERE id=? AND status='pending'",
+            (time.time(), msg_id),
+        )
+        conn.commit()
+        conn.close()
+        return cur.rowcount > 0
+
+    def stats(self) -> dict[str, dict[str, int]]:
+        conn = self._db()
+        rows = conn.execute(
+            "SELECT recipient, status, COUNT(*) as count FROM messages GROUP BY recipient, status"
+        ).fetchall()
+        conn.close()
+        result: dict[str, dict[str, int]] = {}
+        for r in rows:
+            result.setdefault(r["recipient"], {})[r["status"]] = r["count"]
+        return result
+
+    def clear_stuck(self) -> int:
+        conn = self._db()
+        cur = conn.execute(
+            "UPDATE messages SET status='done', response='abandoned on restart', updated_at=? "
+            "WHERE status='processing'",
+            (time.time(),),
+        )
+        conn.commit()
+        count = cur.rowcount
+        conn.close()
+        return count
+
+    def pending_count(self) -> int:
+        conn = self._db()
+        row = conn.execute("SELECT COUNT(*) FROM messages WHERE status='pending'").fetchone()
+        conn.close()
+        return row[0] if row else 0
+
+
+# ── Tmux ────────────────────────────────────────────────────────────────────
+
+class TmuxManager:
+    def __init__(self, session: str = TMUX_SESSION):
+        self.session = session
+        self.panes: dict[str, str] = {}  # role → pane target
+
+    def exists(self) -> bool:
+        r = subprocess.run(["tmux", "has-session", "-t", self.session], capture_output=True)
+        return r.returncode == 0
+
+    def kill(self) -> None:
+        subprocess.run(["tmux", "kill-session", "-t", self.session], capture_output=True)
+
+    def send_keys(self, pane: str, text: str) -> bool:
+        single = text.replace("\n", " ").strip()
+        try:
+            subprocess.run(
+                ["tmux", "send-keys", "-t", pane, single, "Enter"],
+                check=True, capture_output=True,
+            )
+            return True
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            return False
+
+    def capture_pane(self, pane: str, lines: int = 20) -> str:
+        try:
+            r = subprocess.run(
+                ["tmux", "capture-pane", "-t", pane, "-p", "-S", f"-{lines}"],
+                capture_output=True, text=True,
+            )
+            return r.stdout
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            return ""
+
+    def create_session(self, workers: list[str]) -> None:
+        if self.exists():
+            console.print("[yellow]tmux session already exists. Killing it.[/yellow]")
+            self.kill()
+            time.sleep(1)
+
+        # Create session with tiled dashboard
+        subprocess.run(
+            ["tmux", "new-session", "-d", "-s", self.session, "-n", "dashboard"],
+            check=True,
+        )
+
+        # Create panes
+        for i in range(1, len(workers)):
+            subprocess.run(
+                ["tmux", "split-window", "-t", f"{self.session}:dashboard", "-h"],
+                check=True, capture_output=True,
+            )
+            subprocess.run(
+                ["tmux", "select-layout", "-t", f"{self.session}:dashboard", "tiled"],
+                capture_output=True,
+            )
+        subprocess.run(
+            ["tmux", "select-layout", "-t", f"{self.session}:dashboard", "tiled"],
+            capture_output=True,
+        )
+
+        # Map roles to panes and apply theming
+        for i, worker in enumerate(workers):
+            pane_target = f"{self.session}:dashboard.{i}"
+            self.panes[worker] = pane_target
+
+            theme = ROLE_THEME.get(worker, {"color": "colour250", "icon": "🤖", "name": worker})
+
+            # Set pane border color and title
+            subprocess.run([
+                "tmux", "select-pane", "-t", pane_target,
+                "-T", f"{theme['icon']} {theme['name']}",
+                "-P", f"fg={theme['color']}",
+            ], capture_output=True)
+
+        # Enable pane titles and borders
+        subprocess.run([
+            "tmux", "set-option", "-t", self.session, "pane-border-status", "top",
+        ], capture_output=True)
+        subprocess.run([
+            "tmux", "set-option", "-t", self.session, "pane-border-format",
+            " #{pane_title} ",
+        ], capture_output=True)
+        subprocess.run([
+            "tmux", "set-option", "-t", self.session, "pane-border-style", "fg=colour240",
+        ], capture_output=True)
+        subprocess.run([
+            "tmux", "set-option", "-t", self.session, "pane-active-border-style", "fg=colour75,bold",
+        ], capture_output=True)
+
+    def save_pane_map(self) -> None:
+        pane_map = RUNTIME_DIR / ".pane-map"
+        pane_map.write_text(
+            "\n".join(f"{role}={target}" for role, target in self.panes.items())
+        )
+
+
+# ── Role Resolution ─────────────────────────────────────────────────────────
+
+def resolve_role(role: str) -> Path | None:
+    local = LOCAL_ROLES / role / "CLAUDE.md"
+    base = BASE_ROLES / role / "CLAUDE.md"
+    if local.is_file():
+        return local.parent
+    if base.is_file():
+        return base.parent
+    return None
+
+
+def discover_workers() -> list[str]:
+    env_workers = os.environ.get("OCTOBOTS_WORKERS", "")
+    if env_workers:
+        return env_workers.split()
+
+    excluded = set(os.environ.get("OCTOBOTS_EXCLUDED_ROLES", "scout").split())
+    seen: set[str] = set()
+    workers: list[str] = []
+
+    for roles_dir in [LOCAL_ROLES, BASE_ROLES]:
+        if not roles_dir.is_dir():
+            continue
+        for role_dir in sorted(roles_dir.iterdir()):
+            if not role_dir.is_dir():
+                continue
+            role = role_dir.name
+            if role in seen or role in excluded:
+                continue
+            if (role_dir / "CLAUDE.md").is_file():
+                seen.add(role)
+                workers.append(role)
+
+    return workers
+
+
+# ── Supervisor ──────────────────────────────────────────────────────────────
+
+class Supervisor:
+    def __init__(self, workers: list[str], interval: int = 15):
+        self.workers = workers
+        self.interval = interval
+        self.tmux = TmuxManager()
+        self.taskbox = Taskbox(RUNTIME_DIR / "relay.db")
+        self.launched: set[str] = set()
+        self._running = True
+
+    def preflight(self) -> bool:
+        ok = True
+        for cmd in ["tmux", "claude", "python3", "gh", "git"]:
+            if not shutil.which(cmd):
+                console.print(f"[red]✗ {cmd} not found[/red]")
+                ok = False
+        return ok
+
+    def _get_gh_token(self) -> str:
+        """Get GitHub App installation token if configured."""
+        if os.environ.get("OCTOBOTS_GH_APP_ID"):
+            try:
+                gh_token_script = SCRIPT_DIR / "gh-token.py"
+                r = subprocess.run(
+                    ["python3", str(gh_token_script)],
+                    capture_output=True, text=True, timeout=15,
+                    cwd=str(PROJECT_DIR),
+                )
+                if r.returncode == 0 and r.stdout.strip():
+                    return r.stdout.strip()
+                if r.stderr:
+                    console.print(f"[yellow]GitHub App token: {r.stderr.strip()}[/yellow]")
+            except Exception as e:
+                console.print(f"[yellow]GitHub App token failed: {e}[/yellow]")
+        return ""
+
+    def setup(self) -> None:
+        # Init taskbox
+        self.taskbox.init()
+
+        # Get GitHub App token
+        self._gh_token = self._get_gh_token()
+        if self._gh_token:
+            console.print("[green]✓ GitHub App authenticated[/green]")
+        else:
+            console.print("[dim]GitHub App not configured — using personal gh auth[/dim]")
+
+        # Clear stuck messages
+        stuck = self.taskbox.clear_stuck()
+        if stuck:
+            console.print(f"[yellow]Cleared {stuck} stuck message(s) → done[/yellow]")
+
+        # Create tmux session
+        self.tmux.create_session(self.workers)
+
+        # Launch Claude in each pane
+        for role in self.workers:
+            self._launch_worker(role)
+
+        self.tmux.save_pane_map()
+
+    def _launch_worker(self, role: str) -> None:
+        role_dir = resolve_role(role)
+        if not role_dir:
+            console.print(f"[red]✗ {role}: CLAUDE.md not found[/red]")
+            return
+
+        pane = self.tmux.panes.get(role, "")
+        if not pane:
+            return
+
+        # Code workers cd into their isolated environment
+        worker_dir = RUNTIME_DIR / "workers" / role
+        if worker_dir.is_dir():
+            self.tmux.send_keys(pane, f"cd '{worker_dir}'")
+            time.sleep(1)
+            console.print(f"[cyan]◆[/cyan] {role} → {worker_dir}")
+        else:
+            console.print(f"[cyan]◆[/cyan] {role} → workspace root")
+
+        db_path = RUNTIME_DIR / "relay.db"
+        gh_env = f"GH_TOKEN={self._gh_token} " if getattr(self, "_gh_token", "") else ""
+        cmd = (
+            f"{gh_env}OCTOBOTS_ID={role} OCTOBOTS_DB={db_path} "
+            f"CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1 "
+            f"claude --add-dir '{role_dir}' --dangerously-skip-permissions"
+        )
+        self.tmux.send_keys(pane, cmd)
+        self.launched.add(role)
+        time.sleep(3)
+
+    def process_message(self, role: str, msg: dict) -> None:
+        pane = self.tmux.panes.get(role, "")
+        if not pane:
+            return
+
+        msg_id = msg["id"]
+        sender = msg["sender"]
+        content = msg["content"]
+
+        if not self.taskbox.claim(msg_id):
+            return
+
+        # Build single-line task prompt
+        notify_cmd = f"octobots/scripts/notify-user.sh"
+        relay_cmd = f"python3 {RELAY_SCRIPT}"
+        prompt = (
+            f"Message from {sender}: {content} "
+            f"-- RULES: You MUST respond to this message. "
+            f"If it is a task: do the work, then 1) comment on the GitHub issue, "
+            f"2) run: {relay_cmd} ack {msg_id} \"your summary\", "
+            f"3) run: {notify_cmd} \"Done: summary\". "
+            f"If it is a question: answer via {relay_cmd} ack {msg_id} \"your answer\". "
+            f"NEVER ignore a message. Silence breaks the pipeline."
+        )
+        self.tmux.send_keys(pane, prompt)
+        console.print(f"[green]→[/green] {role}: task from {sender} ({msg_id[:8]})")
+
+    def poll_once(self) -> None:
+        # Poll taskbox
+        for role in self.workers:
+            msgs = self.taskbox.inbox(role, limit=1)
+            if msgs:
+                self.process_message(role, msgs[0])
+
+        # Poll GitHub for issues assigned to the bot
+        self._poll_github_issues()
+
+    def _poll_github_issues(self) -> None:
+        """Check for GitHub issues assigned to the bot and route to PM."""
+        gh_token = getattr(self, "_gh_token", "")
+        issue_repo = os.environ.get("OCTOBOTS_ISSUE_REPO", "")
+        if not gh_token or not issue_repo:
+            return
+
+        # Only check every 60 seconds (not every poll cycle)
+        now = time.time()
+        if now - getattr(self, "_last_gh_poll", 0) < 60:
+            return
+        self._last_gh_poll = now
+
+        try:
+            import urllib.request
+            owner, repo = issue_repo.split("/", 1)
+            url = (
+                f"https://api.github.com/repos/{owner}/{repo}/issues"
+                f"?assignee=octobotsai[bot]&state=open&per_page=10"
+            )
+            req = urllib.request.Request(url, headers={
+                "Authorization": f"token {gh_token}",
+                "Accept": "application/vnd.github+json",
+            })
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                issues = json.loads(resp.read())
+
+            if not issues:
+                return
+
+            # Track which issues we've already routed
+            seen = getattr(self, "_routed_issues", set())
+
+            for issue in issues:
+                issue_num = issue["number"]
+                if issue_num in seen:
+                    continue
+
+                seen.add(issue_num)
+                title = issue["title"]
+                labels = [l["name"] for l in issue.get("labels", [])]
+                url = issue["html_url"]
+
+                # Route to PM via taskbox
+                import uuid
+                msg_id = uuid.uuid4().hex[:12]
+                self.taskbox.init()  # ensure table exists
+                conn = self.taskbox._db()
+                conn.execute(
+                    "INSERT INTO messages (id, sender, recipient, content, status, created_at, updated_at) "
+                    "VALUES (?, 'github', 'project-manager', ?, 'pending', ?, ?)",
+                    (msg_id, f"New issue assigned to octobots — #{issue_num}: {title}. Labels: {', '.join(labels)}. URL: {url}", now, now),
+                )
+                conn.commit()
+                conn.close()
+
+                console.print(f"[blue]📥[/blue] Issue #{issue_num} assigned to bot → routed to pm")
+
+            self._routed_issues = seen
+
+        except Exception as e:
+            pass  # silent — don't spam logs on network failures
+
+    # ── Slash Commands ──────────────────────────────────────────────────────
+
+    def cmd_status(self) -> None:
+        table = Table(title="Worker Status", box=box.ROUNDED)
+        table.add_column("Role", style="cyan")
+        table.add_column("Pane", style="dim")
+        table.add_column("State", style="green")
+        table.add_column("Last Output", style="white", max_width=60)
+
+        for role in self.workers:
+            pane = self.tmux.panes.get(role, "?")
+            output = self.tmux.capture_pane(pane, 5).strip().split("\n")
+            last_line = output[-1] if output else ""
+            # Detect state from output
+            if "bypass permissions" in last_line.lower():
+                state = "[green]idle[/green]"
+            elif ">" in last_line or "❯" in last_line:
+                state = "[green]idle[/green]"
+            else:
+                state = "[yellow]working[/yellow]"
+
+            # Clean ANSI codes
+            import re
+            last_line = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', last_line)[:60]
+
+            table.add_row(role, pane.split(".")[-1], state, last_line)
+
+        console.print(table)
+
+    def cmd_tasks(self) -> None:
+        stats = self.taskbox.stats()
+        if not stats:
+            console.print("[dim]No taskbox activity.[/dim]")
+            return
+
+        table = Table(title="Taskbox", box=box.ROUNDED)
+        table.add_column("Role", style="cyan")
+        table.add_column("Pending", style="yellow")
+        table.add_column("Processing", style="blue")
+        table.add_column("Done", style="green")
+
+        for role, counts in sorted(stats.items()):
+            table.add_row(
+                role,
+                str(counts.get("pending", 0)),
+                str(counts.get("processing", 0)),
+                str(counts.get("done", 0)),
+            )
+        console.print(table)
+
+    def cmd_workers(self) -> None:
+        table = Table(title="Workers", box=box.ROUNDED)
+        table.add_column("Role", style="cyan")
+        table.add_column("Pane", style="dim")
+        table.add_column("Source", style="blue")
+        table.add_column("Environment", style="green")
+
+        for role in self.workers:
+            pane = self.tmux.panes.get(role, "?")
+            role_dir = resolve_role(role)
+            source = "project" if role_dir and str(LOCAL_ROLES) in str(role_dir) else "base"
+            worker_dir = RUNTIME_DIR / "workers" / role
+            env = "isolated" if worker_dir.is_dir() else "shared"
+            table.add_row(role, pane, source, env)
+
+        console.print(table)
+
+    def cmd_logs(self, role: str, lines: int = 30) -> None:
+        pane = self.tmux.panes.get(role)
+        if not pane:
+            console.print(f"[red]Unknown role: {role}[/red]")
+            return
+        output = self.tmux.capture_pane(pane, lines)
+        console.print(Panel(output.strip(), title=f"[cyan]{role}[/cyan]", box=box.ROUNDED))
+
+    def cmd_send(self, role: str, message: str) -> None:
+        pane = self.tmux.panes.get(role)
+        if not pane:
+            console.print(f"[red]Unknown role: {role}[/red]")
+            return
+        self.tmux.send_keys(pane, message)
+        console.print(f"[green]→[/green] Sent to {role}")
+
+    def cmd_restart(self, role: str) -> None:
+        if role == "all":
+            for r in self.workers:
+                self.cmd_restart(r)
+            return
+
+        pane = self.tmux.panes.get(role)
+        if not pane:
+            console.print(f"[red]Unknown role: {role}[/red]")
+            return
+
+        console.print(f"[yellow]Restarting {role}...[/yellow]")
+        self.tmux.send_keys(pane, "/exit")
+        time.sleep(3)
+        self._launch_worker(role)
+        console.print(f"[green]✓ {role} restarted[/green]")
+
+    def cmd_clear(self, role: str) -> None:
+        pane = self.tmux.panes.get(role)
+        if not pane:
+            console.print(f"[red]Unknown role: {role}[/red]")
+            return
+        self.tmux.send_keys(pane, "/clear")
+        console.print(f"[green]✓ {role} cleared[/green]")
+
+    def cmd_board(self) -> None:
+        board_path = RUNTIME_DIR / "board.md"
+        if board_path.is_file():
+            from rich.markdown import Markdown
+            console.print(Panel(Markdown(board_path.read_text()), title="Team Board", box=box.ROUNDED))
+        else:
+            console.print("[dim]No board.md found.[/dim]")
+
+    def cmd_health(self) -> None:
+        table = Table(title="Health Check", box=box.ROUNDED)
+        table.add_column("Check", style="cyan")
+        table.add_column("Status")
+
+        # tmux
+        table.add_row("tmux session", "[green]✓[/green]" if self.tmux.exists() else "[red]✗[/red]")
+
+        # relay DB
+        db_ok = (RUNTIME_DIR / "relay.db").is_file()
+        table.add_row("taskbox DB", "[green]✓[/green]" if db_ok else "[red]✗[/red]")
+
+        # panes alive
+        for role in self.workers:
+            pane = self.tmux.panes.get(role, "")
+            output = self.tmux.capture_pane(pane, 1)
+            alive = bool(output.strip())
+            table.add_row(f"  {role}", "[green]alive[/green]" if alive else "[red]dead[/red]")
+
+        # board
+        table.add_row("board.md", "[green]✓[/green]" if (RUNTIME_DIR / "board.md").is_file() else "[dim]missing[/dim]")
+
+        # bridge
+        bridge_alive = hasattr(self, "_bridge_proc") and self._bridge_proc and self._bridge_proc.poll() is None
+        table.add_row("telegram bridge", "[green]running[/green]" if bridge_alive else "[dim]not started (/bridge)[/dim]")
+
+        # pending messages
+        pending = self.taskbox.pending_count()
+        table.add_row("pending tasks", f"[yellow]{pending}[/yellow]" if pending else "[green]0[/green]")
+
+        console.print(table)
+
+    def cmd_bridge(self, restart: bool = False) -> None:
+        """Start or restart the Telegram bridge as a background process."""
+        if hasattr(self, "_bridge_proc") and self._bridge_proc and self._bridge_proc.poll() is None:
+            if not restart:
+                console.print(f"[yellow]Bridge already running (PID: {self._bridge_proc.pid}). Use /bridge restart[/yellow]")
+                return
+            self._bridge_proc.terminate()
+            self._bridge_proc.wait(timeout=5)
+            console.print("[yellow]Bridge stopped.[/yellow]")
+
+        bridge_script = SCRIPT_DIR / "telegram-bridge.py"
+        if not bridge_script.is_file():
+            console.print("[red]telegram-bridge.py not found[/red]")
+            return
+
+        # Check for Telegram config
+        token = os.environ.get("OCTOBOTS_TG_TOKEN", "")
+        if not token:
+            console.print("[red]OCTOBOTS_TG_TOKEN not set. Add it to .env.octobots[/red]")
+            return
+
+        # Find Python
+        for py in [PROJECT_DIR / "venv" / "bin" / "python", PROJECT_DIR / ".venv" / "bin" / "python"]:
+            if py.is_file():
+                python = str(py)
+                break
+        else:
+            python = "python3"
+
+        self._bridge_proc = subprocess.Popen(
+            [python, str(bridge_script)],
+            cwd=str(PROJECT_DIR),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        console.print(f"[green]✓ Telegram bridge started (PID: {self._bridge_proc.pid})[/green]")
+
+    def cmd_help(self) -> None:
+        table = Table(title="Commands", box=box.ROUNDED, show_header=False)
+        table.add_column("Command", style="cyan")
+        table.add_column("Description")
+
+        cmds = [
+            ("/status", "Worker states and last output"),
+            ("/workers", "List panes, sources, environments"),
+            ("/tasks", "Taskbox stats"),
+            ("/logs <role> [N]", "Last N lines from a worker"),
+            ("/send <role> <msg>", "Send a message to a worker's pane"),
+            ("/restart <role|all>", "Restart a worker (exit + relaunch)"),
+            ("/clear <role>", "Send /clear to a worker"),
+            ("/board", "Show team board"),
+            ("/bridge", "Start Telegram bridge (background)"),
+            ("/health", "System health check"),
+            ("/stop", "Graceful shutdown"),
+            ("/help", "This help"),
+        ]
+        for cmd, desc in cmds:
+            table.add_row(cmd, desc)
+
+        console.print(table)
+
+    def handle_command(self, line: str) -> bool:
+        """Handle a slash command. Returns False to exit."""
+        parts = line.strip().split()
+        if not parts:
+            return True
+
+        cmd = parts[0].lower()
+        args = parts[1:]
+
+        if cmd == "/status":
+            self.cmd_status()
+        elif cmd == "/workers":
+            self.cmd_workers()
+        elif cmd == "/tasks":
+            self.cmd_tasks()
+        elif cmd == "/logs":
+            role = args[0] if args else ""
+            lines = int(args[1]) if len(args) > 1 else 30
+            self.cmd_logs(role, lines)
+        elif cmd == "/send":
+            if len(args) >= 2:
+                self.cmd_send(args[0], " ".join(args[1:]))
+            else:
+                console.print("[red]Usage: /send <role> <message>[/red]")
+        elif cmd == "/restart":
+            self.cmd_restart(args[0] if args else "all")
+        elif cmd == "/clear":
+            if args:
+                self.cmd_clear(args[0])
+            else:
+                console.print("[red]Usage: /clear <role>[/red]")
+        elif cmd == "/board":
+            self.cmd_board()
+        elif cmd == "/bridge":
+            self.cmd_bridge(restart="restart" in args)
+        elif cmd == "/health":
+            self.cmd_health()
+        elif cmd in ("/stop", "/quit", "/exit"):
+            return False
+        elif cmd == "/help":
+            self.cmd_help()
+        else:
+            console.print(f"[red]Unknown command: {cmd}[/red]. Type /help for commands.")
+
+        return True
+
+    # ── Main Loop ───────────────────────────────────────────────────────────
+
+    def run(self) -> None:
+        # Banner
+        console.print()
+        console.print(Panel(
+            "[bold cyan]Octobots Supervisor[/bold cyan]\n\n"
+            f"Workers: [green]{', '.join(self.workers)}[/green]\n"
+            f"Poll: [yellow]{self.interval}s[/yellow] │ tmux: [blue]{TMUX_SESSION}[/blue]\n"
+            f"DB: [dim]{RUNTIME_DIR / 'relay.db'}[/dim]\n\n"
+            f"View all: [bold]tmux attach -t {TMUX_SESSION}[/bold]\n"
+            "Type [cyan]/help[/cyan] for commands.",
+            box=box.DOUBLE,
+            title="[bold white]🤖[/bold white]",
+        ))
+        console.print()
+
+        # Background polling
+        import threading
+
+        def poll_loop():
+            while self._running:
+                try:
+                    self.poll_once()
+                except Exception as e:
+                    console.print(f"[red]Poll error: {e}[/red]")
+                time.sleep(self.interval)
+
+        poller = threading.Thread(target=poll_loop, daemon=True)
+        poller.start()
+
+        # Interactive command loop
+        try:
+            while self._running:
+                try:
+                    line = Prompt.ask("[bold cyan]octobots[/bold cyan]")
+                    if not line.strip():
+                        continue
+                    if not line.startswith("/"):
+                        console.print("[dim]Type /help for commands, or prefix with / to run a command.[/dim]")
+                        continue
+                    if not self.handle_command(line):
+                        break
+                except (KeyboardInterrupt, EOFError):
+                    break
+        finally:
+            self._running = False
+            console.print("\n[yellow]Supervisor stopped. Workers still running in tmux.[/yellow]")
+            console.print(f"Reattach: [bold]tmux attach -t {TMUX_SESSION}[/bold]")
+            console.print(f"Kill all:  [bold]tmux kill-session -t {TMUX_SESSION}[/bold]")
+
+
+# ── Main ────────────────────────────────────────────────────────────────────
+
+def main() -> None:
+    load_env()
+
+    parser = argparse.ArgumentParser(description="Octobots Supervisor")
+    parser.add_argument("--interval", type=int, default=15, help="Poll interval in seconds")
+    parser.add_argument("--workers", nargs="*", help="Specific workers to launch")
+    args = parser.parse_args()
+
+    # Ensure runtime dir
+    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    (RUNTIME_DIR / "memory").mkdir(exist_ok=True)
+
+    workers = args.workers or discover_workers()
+    if not workers:
+        console.print("[red]No workers found. Check octobots/roles/ or .octobots/roles/[/red]")
+        sys.exit(1)
+
+    supervisor = Supervisor(workers, args.interval)
+
+    if not supervisor.preflight():
+        console.print("\n[red]Install missing tools and try again.[/red]")
+        sys.exit(1)
+
+    supervisor.setup()
+    supervisor.run()
+
+
+if __name__ == "__main__":
+    main()

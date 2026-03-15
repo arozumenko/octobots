@@ -1,0 +1,74 @@
+# ── Claude Code runtime state (generated per role) ──────────────────────────
+# Each role's .claude/ dir accumulates session data, history, caches
+roles/*/.claude/.claude.json
+roles/*/.claude/backups/
+roles/*/.claude/cache/
+roles/*/.claude/debug/
+roles/*/.claude/file-history/
+roles/*/.claude/history.jsonl
+roles/*/.claude/mcp-needs-auth-cache.json
+roles/*/.claude/paste-cache/
+roles/*/.claude/plans/
+roles/*/.claude/plugins/
+roles/*/.claude/projects/
+roles/*/.claude/session-env/
+roles/*/.claude/sessions/
+roles/*/.claude/settings.local.json
+roles/*/.claude/shell-snapshots/
+roles/*/.claude/stats-cache.json
+roles/*/.claude/tasks/
+roles/*/.claude/telemetry/
+roles/*/.claude/todos/
+
+# ── Runtime state (lives in project's .octobots/, not in framework) ─────────
+# .octobots/ is created per-project by init-project.sh
+
+# ── Secrets ─────────────────────────────────────────────────────────────────
+*.pem
+.gh-token-cache
+
+# ── Taskbox database (runtime, recreated on init) ───────────────────────────
+*.db
+*.db-wal
+*.db-shm
+
+# ── Worktrees (temporary, per-task) ─────────────────────────────────────────
+.worktrees/
+
+# ── Generated project config (lives in target project, not octonauts) ───────
+.octonauts/
+
+# ── Python ──────────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# ── Node ────────────────────────────────────────────────────────────────────
+node_modules/
+
+# ── Environment & secrets ──────────────────────────────────────────────────
+.env
+.env.*
+.mcp.json
+
+# ── OS ──────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── IDE ─────────────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ── What IS tracked ─────────────────────────────────────────────────────────
+# roles/*/SOUL.md        — personality (versioned)
+# roles/*/CLAUDE.md      — instructions (versioned)
+# roles/*/MEMORY.md      — persistent learnings (versioned)
+# roles/*/.claude/skills/ — symlinks to shared skills (versioned)
+# roles/*/.claude/agents/ — symlinks to shared agents (versioned)
+# skills/*/               — skill definitions (versioned)
+# shared/                 — conventions + shared agents (versioned)

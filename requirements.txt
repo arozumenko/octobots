@@ -1,0 +1,8 @@
+# Octobots dependencies
+# Core (taskbox, relay) has zero deps — Python stdlib only
+# These are for the supervisor, bridges, and auth
+
+rich>=13.0                  # Supervisor TUI
+python-dotenv>=1.0          # .env.octobots loading
+cryptography>=41.0          # GitHub App JWT signing
+python-telegram-bot>=21.0   # Telegram bridge (optional)

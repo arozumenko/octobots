@@ -1,0 +1,68 @@
+%%{init: {'theme': 'dark', 'themeVariables': { 'primaryColor': '#2d3748', 'primaryTextColor': '#e2e8f0', 'primaryBorderColor': '#4a5568', 'lineColor': '#63b3ed', 'secondaryColor': '#1a202c', 'tertiaryColor': '#2d3748', 'edgeLabelBackground': '#1a202c', 'fontSize': '13px' }}}%%
+
+flowchart LR
+    subgraph WS["📁 Workspace Root (not a git repo)"]
+        direction TB
+        subgraph Repos["Original Repos (14)"]
+            direction LR
+            CORE["core/
+React frontend"]
+            GW["services/gateway/
+API Gateway :8000"]
+            TM["services/test-mgmt/
+Test Cases :8007"]
+            MEM["services/membership/
+Products :8005"]
+            MORE["+ 4 more services
++ 3 shared libs"]
+            TESTS["octi-tests/
+E2E automation"]
+        end
+        subgraph Shared["Shared Resources"]
+            direction LR
+            VENV["🐍 venv/"]
+            ENV[".env"]
+            MCP[".mcp.json"]
+            DB["🐘 PostgreSQL"]
+        end
+    end
+
+    subgraph Workers[".octobots/workers/"]
+        direction TB
+        subgraph PY["🐍 py workspace"]
+            direction LR
+            PYC["core/ ← clone"]
+            PYS["services/ ← clones"]
+            PYT["octi-tests/ ← clone"]
+        end
+        subgraph JS["⚡ js workspace"]
+            direction LR
+            JSC["core/ ← clone"]
+            JSS["services/ ← clones"]
+            JST["octi-tests/ ← clone"]
+        end
+        subgraph QA["🧪 qa workspace"]
+            direction LR
+            QAC["core/ ← clone"]
+            QAS["services/ ← clones"]
+            QAT["octi-tests/ ← clone"]
+        end
+    end
+
+    VENV -.->|symlink| PY
+    VENV -.->|symlink| JS
+    VENV -.->|symlink| QA
+    ENV -.->|symlink| PY
+    ENV -.->|symlink| JS
+    ENV -.->|symlink| QA
+    DB -.->|shared| PY
+    DB -.->|shared| JS
+    DB -.->|shared| QA
+
+    style WS fill:#1a202c,stroke:#4a5568,stroke-width:1px
+    style Workers fill:#1a365d,stroke:#63b3ed,stroke-width:2px
+    style Repos fill:#2d3748,stroke:#4a5568,stroke-width:1px
+    style Shared fill:#2d3748,stroke:#4a5568,stroke-width:1px
+    style PY fill:#1c2a3a,stroke:#63b3ed,stroke-width:1px
+    style JS fill:#1c2a3a,stroke:#ecc94b,stroke-width:1px
+    style QA fill:#1c2a3a,stroke:#68d391,stroke-width:1px

@@ -1,0 +1,33 @@
+%%{init: {'theme': 'dark', 'themeVariables': { 'primaryColor': '#2d3748', 'primaryTextColor': '#e2e8f0', 'primaryBorderColor': '#4a5568', 'lineColor': '#63b3ed', 'secondaryColor': '#1a202c', 'tertiaryColor': '#2d3748', 'edgeLabelBackground': '#1a202c', 'fontSize': '15px' }}}%%
+
+flowchart TD
+    subgraph Input["Senders"]
+        direction LR
+        PM["📋 pm"] ~~~ TL["🏗️ tl"] ~~~ GH["🔔 github"] ~~~ TG["💬 telegram"]
+    end
+
+    Input -->|"send(to, content)"| PENDING
+
+    PENDING["⏳ PENDING
+waiting in recipient's inbox"]
+    PENDING -->|"inbox(role) → claim(id)"| PROCESSING
+    PROCESSING["⚙️ PROCESSING
+locked by one worker"]
+    PROCESSING -->|"ack(id, response)"| DONE
+    DONE["✅ DONE
+response attached"]
+
+    PENDING -->|"inbox()"| Output
+
+    subgraph Output["Workers"]
+        direction LR
+        PY["🐍 py"] ~~~ JS["⚡ js"] ~~~ QA["🧪 qa"] ~~~ BA["📝 ba"]
+    end
+
+    Output -->|"claim() → do work → ack()"| DONE
+
+    style PENDING fill:#744210,stroke:#ecc94b,stroke-width:2px,color:#fefcbf
+    style PROCESSING fill:#2a4365,stroke:#63b3ed,stroke-width:2px,color:#bee3f8
+    style DONE fill:#22543d,stroke:#68d391,stroke-width:2px,color:#c6f6d5
+    style Input fill:#1a202c,stroke:#4a5568,stroke-width:1px
+    style Output fill:#1a202c,stroke:#4a5568,stroke-width:1px

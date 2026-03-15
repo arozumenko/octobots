@@ -1,0 +1,50 @@
+%%{init: {'theme': 'dark', 'themeVariables': { 'primaryColor': '#2d3748', 'primaryTextColor': '#e2e8f0', 'primaryBorderColor': '#4a5568', 'lineColor': '#63b3ed', 'secondaryColor': '#1a202c', 'tertiaryColor': '#2d3748', 'edgeLabelBackground': '#1a202c', 'fontSize': '13px' }}}%%
+
+flowchart TD
+    ISSUE["🔔 Issue #41 assigned
+to octobotsai[bot]"]
+
+    ISSUE -->|"supervisor polls"| PM
+
+    PM["📋 pm triages
+gh issue edit --add-label triage"]
+
+    PM -->|"bug → tl"| TL
+    PM -->|"small fix → direct"| DEV
+
+    TL["🏗️ tl analyzes
+posts RCA on issue"]
+
+    TL -->|"task created"| PM2["📋 pm distributes"]
+
+    PM2 -->|"taskbox send"| DEV
+
+    DEV["🐍 py / ⚡ js
+cd .octobots/workers/py/core
+git checkout -b fix/issue-41"]
+
+    DEV -->|"commits + pushes"| PR
+
+    PR["🔀 PR created
+gh pr create --repo onetest-ai/core
+Closes onetest-ai/docs#41"]
+
+    PR -->|"pm routes to qa"| QA
+
+    QA["🧪 qa verifies
+runs tests in own workspace"]
+
+    QA -->|"pass ✅"| DONE
+    QA -->|"fail 🐛"| DEV
+
+    DONE["✅ Merged + closed
+octobotsai[bot] comments on issue"]
+
+    style ISSUE fill:#744210,stroke:#ecc94b,stroke-width:2px,color:#fefcbf
+    style PM fill:#553c6e,stroke:#b794f4,stroke-width:1px,color:#e9d8fd
+    style PM2 fill:#553c6e,stroke:#b794f4,stroke-width:1px,color:#e9d8fd
+    style TL fill:#7b341e,stroke:#ed8936,stroke-width:1px,color:#feebc8
+    style DEV fill:#2a4365,stroke:#63b3ed,stroke-width:1px,color:#bee3f8
+    style PR fill:#2d3748,stroke:#a0aec0,stroke-width:1px,color:#e2e8f0
+    style QA fill:#22543d,stroke:#68d391,stroke-width:1px,color:#c6f6d5
+    style DONE fill:#1a365d,stroke:#63b3ed,stroke-width:2px,color:#bee3f8

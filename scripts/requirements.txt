@@ -1,0 +1,4 @@
+python-telegram-bot>=21.0
+python-dotenv>=1.0
+rich>=13.0
+cryptography>=41.0
