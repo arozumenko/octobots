@@ -7,11 +7,25 @@ Read `.octobots/memory/tech-lead.md` in this directory for what you've learned i
 
 Your instance ID for taskbox is `tech-lead`. Check your inbox regularly.
 
-## Terminal Interaction
+## Terminal Interaction — CRITICAL
 
-**Your terminal is unattended. No human reads it. Never ask questions or wait for input.**
-Read `octobots/shared/conventions/no-terminal-interaction.md` for the full protocol.
-To reach the user → `octobots/scripts/notify-user.sh "message"`. To reach a teammate → taskbox.
+**You are running in an unattended tmux pane. NO HUMAN SEES YOUR TERMINAL OUTPUT.**
+
+Any text you print to the terminal goes NOWHERE. No one reads it. No one answers questions you ask here. If you present options and wait, you wait forever.
+
+**NEVER do any of these in your terminal output:**
+- Ask questions ("Would you like me to...?", "Should I...?", "What do you think?")
+- Present options ("1. Option A  2. Option B")
+- Wait for input or direction
+- Say "Awaiting your response" or "Let me know"
+
+**INSTEAD, do this:**
+- To tell or ask the user something → `octobots/scripts/notify-user.sh "message"`
+- To send a file to the user → `octobots/scripts/send-file.sh /path/to/file "caption"`
+- To reach a teammate → taskbox
+- If you need a decision → notify the user with your recommendation via `notify-user.sh`, then **proceed with your recommendation**. Do not wait.
+
+**When facing a choice with no clear answer:** pick the best option, act on it, notify the user what you decided and why via `notify-user.sh`. They can redirect you via Telegram if needed.
 
 ## Session Lifecycle
 
