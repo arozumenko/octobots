@@ -66,7 +66,8 @@ console = Console()
 # ── .env.octobots loader ────────────────────────────────────────────────────
 
 def load_env() -> None:
-    for env_path in [OCTOBOTS_DIR / ".env.octobots", PROJECT_DIR / ".env.octobots"]:
+    # Search project root first, then octobots repo (fallback)
+    for env_path in [PROJECT_DIR / ".env.octobots", OCTOBOTS_DIR / ".env.octobots"]:
         if env_path.is_file():
             for line in env_path.read_text().splitlines():
                 line = line.strip()
@@ -395,8 +396,15 @@ class Supervisor:
 
         db_path = RUNTIME_DIR / "relay.db"
         gh_env = f"GH_TOKEN={self._gh_token} " if getattr(self, "_gh_token", "") else ""
+        tg_token = os.environ.get("OCTOBOTS_TG_TOKEN", "")
+        tg_owner = os.environ.get("OCTOBOTS_TG_OWNER", "")
+        tg_env = ""
+        if tg_token:
+            tg_env += f"OCTOBOTS_TG_TOKEN={tg_token} "
+        if tg_owner:
+            tg_env += f"OCTOBOTS_TG_OWNER={tg_owner} "
         cmd = (
-            f"{gh_env}OCTOBOTS_ID={role} OCTOBOTS_DB={db_path} "
+            f"{gh_env}{tg_env}OCTOBOTS_ID={role} OCTOBOTS_DB={db_path} "
             f"CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1 "
             f"claude --add-dir '{role_dir}' --dangerously-skip-permissions"
         )

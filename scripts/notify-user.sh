@@ -33,8 +33,15 @@ if [[ -z "$MESSAGE" ]]; then
 fi
 
 # Load .env.octobots if not already in env
+# Search order: project root (via git), cwd, octobots repo root
 if [[ -z "${OCTOBOTS_TG_TOKEN:-}" ]]; then
-    for env_file in "$SCRIPT_DIR/../.env.octobots" ".env.octobots"; do
+    PROJECT_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || echo "")"
+    for env_file in \
+        "${PROJECT_ROOT:+$PROJECT_ROOT/.env.octobots}" \
+        ".env.octobots" \
+        "$SCRIPT_DIR/../.env.octobots" \
+        "$SCRIPT_DIR/../../.env.octobots"; do
+        [[ -z "$env_file" ]] && continue
         if [[ -f "$env_file" ]]; then
             while IFS='=' read -r key value; do
                 key=$(echo "$key" | tr -d ' ')
