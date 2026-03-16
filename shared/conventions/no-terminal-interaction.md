@@ -22,6 +22,25 @@ The script auto-tags your message with your role name: `[python-dev] your messag
 
 Messages support HTML formatting: `<b>bold</b>`, `<i>italic</i>`, `<code>inline code</code>`, `<pre>code block</pre>`.
 
+**Long messages are auto-sent as documents.** If your message exceeds 4000 characters, `notify-user.sh` automatically sends it as a `.md` file attachment with a short caption preview. You don't need to do anything special.
+
+## Sending Files
+
+To send a file (epic document, analysis, test report, etc.) directly to the user:
+
+```bash
+# Send an existing file
+octobots/scripts/send-file.sh /path/to/file.md "optional caption"
+
+# Pipe content as a file
+echo "$CONTENT" | octobots/scripts/send-file.sh --stdin "epic-001.md" "Epic ready for review"
+```
+
+**When to send files vs text:**
+- **Short status/question (< 10 lines):** use `notify-user.sh` — appears inline in chat
+- **Documents, reports, epics, stories:** use `send-file.sh` — user gets a downloadable file
+- **Long output you didn't plan for:** just use `notify-user.sh` — it auto-converts to a document if over 4000 chars
+
 ## Writing Good Telegram Messages
 
 Telegram messages arrive on a phone. They must be **self-contained, scannable, and actionable**.
@@ -103,6 +122,7 @@ Telegram is async. The user may not reply immediately.
 |------|---------|-----|
 | Tell the user something | `notify-user.sh` | Any role |
 | Ask the user something | `notify-user.sh` + your recommendation | Any role |
+| Send a document/report | `send-file.sh` | Any role |
 | Tell a teammate something | Taskbox | Any role |
 | Record a decision/result | GitHub issue comment | Any role |
 | Terminal output | **Nobody. Ever.** | — |
