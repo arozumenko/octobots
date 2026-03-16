@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Telegram bridge for Octobots — sends user messages to PM's tmux pane.
+"""Telegram bridge for Octobots — user interface via Telegram.
 
 Architecture:
-  User (Telegram) → bridge → tmux send-keys to PM pane
+  User (Telegram) → bridge → tmux send-keys to worker panes
   Any role → notify-user.sh → Telegram Bot API → User
+  Slash commands → read taskbox/schedule/tmux directly
 
 No taskbox for user ↔ PM. Taskbox is only for inter-role communication.
 Notifications from roles go directly via Telegram Bot API (notify-user.sh).
@@ -28,6 +29,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+# Allow importing sibling modules (roles.py)
+sys.path.insert(0, str(Path(__file__).parent))
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
@@ -43,6 +47,12 @@ TG_TOKEN = os.environ.get("OCTOBOTS_TG_TOKEN", "")
 TG_OWNER = os.environ.get("OCTOBOTS_TG_OWNER", "")
 TMUX_SESSION = os.environ.get("OCTOBOTS_TMUX", "octobots")
 PM_PANE = os.environ.get("OCTOBOTS_PM_PANE", "project-manager")
+
+SCRIPT_DIR = Path(__file__).parent
+OCTOBOTS_DIR = SCRIPT_DIR.parent
+PROJECT_DIR = Path.cwd()
+RUNTIME_DIR = PROJECT_DIR / ".octobots"
+RELAY_SCRIPT = OCTOBOTS_DIR / "skills" / "taskbox" / "scripts" / "relay.py"
 
 
 def _check_env() -> None:
@@ -199,6 +209,23 @@ def tmux_session_exists() -> bool:
     return result.returncode == 0
 
 
+def tmux_capture(pane: str, lines: int = 20) -> str:
+    """Capture last N lines from a tmux pane."""
+    try:
+        r = subprocess.run(
+            ["tmux", "capture-pane", "-t", pane, "-p", "-S", f"-{lines}"],
+            capture_output=True, text=True,
+        )
+        return r.stdout.strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return ""
+
+
+def _strip_ansi(text: str) -> str:
+    """Remove ANSI escape codes."""
+    return re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', text)
+
+
 # ── Telegram send with HTML formatting ──────────────────────────────────────
 
 async def send_telegram(bot, chat_id: int, text: str, role: str = "") -> None:
@@ -231,7 +258,7 @@ async def send_telegram(bot, chat_id: int, text: str, role: str = "") -> None:
 # ── Telegram bot ────────────────────────────────────────────────────────────
 
 async def run_bot() -> None:
-    from telegram import Update
+    from telegram import Update, BotCommand
     from telegram.ext import (
         Application,
         CommandHandler,
@@ -239,44 +266,86 @@ async def run_bot() -> None:
         filters,
         ContextTypes,
     )
+    from roles import ROLE_ALIASES as ALIASES, ROLE_DISPLAY as DISPLAY_NAMES, resolve_alias
+
+    def _auth(update: Update) -> bool:
+        return str(update.effective_user.id) == TG_OWNER
+
+    # ── /start ─────────────────────────────────────────────────────────
 
     async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if str(update.effective_user.id) != TG_OWNER:
+        if not _auth(update):
             await update.message.reply_text("Unauthorized.")
             return
         await send_telegram(
             context.bot,
             update.effective_chat.id,
             "<b>Octobots</b> connected.\n\n"
-            "Messages go directly to <b>Max</b> (PM).\n"
+            "Messages go to <b>Max</b> (PM) by default.\n"
             "Use <code>@role message</code> to reach a specific team member.\n\n"
             "<b>Commands:</b>\n"
-            "• /status — team queue stats\n"
-            "• /team — list active roles\n",
+            "• /status — worker states\n"
+            "• /tasks — taskbox queue stats\n"
+            "• /team — list roles and aliases\n"
+            "• /logs <i>role</i> — last output from a worker\n"
+            "• /board — team whiteboard\n"
+            "• /health — system health check\n"
+            "• /jobs — scheduled jobs\n"
+            "• /schedule — create a scheduled job\n"
+            "• /loop — shortcut for recurring schedule\n"
+            "• /restart <i>role</i> — restart a worker\n"
+            "• /help — full command reference\n",
         )
 
+    # ── /status — worker states ────────────────────────────────────────
+
     async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if str(update.effective_user.id) != TG_OWNER:
+        if not _auth(update):
+            return
+        pane_map = _load_pane_map()
+        if not pane_map:
+            await send_telegram(context.bot, update.effective_chat.id, "<i>No workers running.</i>")
+            return
+
+        lines = ["<b>Worker Status</b>\n"]
+        for role, pane in sorted(pane_map.items()):
+            output = tmux_capture(pane, 3)
+            last_line = _strip_ansi(output.split("\n")[-1]) if output else ""
+            display = DISPLAY_NAMES.get(role, role)
+            # Detect idle vs working
+            if not last_line or ">" in last_line or "❯" in last_line or "bypass" in last_line.lower():
+                state = "💤"
+            else:
+                state = "⚙️"
+            lines.append(f"{display} {state}  <code>{last_line[:50]}</code>")
+
+        await send_telegram(context.bot, update.effective_chat.id, "\n".join(lines))
+
+    # ── /tasks — taskbox stats ─────────────────────────────────────────
+
+    async def cmd_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not _auth(update):
             return
         try:
-            relay = str(Path(__file__).parent.parent / "skills" / "taskbox" / "scripts" / "relay.py")
             result = subprocess.run(
-                ["python3", relay, "stats"],
+                ["python3", str(RELAY_SCRIPT), "stats"],
                 capture_output=True, text=True, timeout=10,
             )
             stats = result.stdout.strip()
             if not stats or stats == "{}":
-                await send_telegram(context.bot, update.effective_chat.id, "<i>No activity yet.</i>")
+                await send_telegram(context.bot, update.effective_chat.id, "<i>No taskbox activity.</i>")
             else:
                 await send_telegram(
                     context.bot, update.effective_chat.id,
-                    f"<b>Queue Status</b>\n<pre>{stats}</pre>",
+                    f"<b>Taskbox</b>\n<pre>{stats}</pre>",
                 )
         except Exception as e:
             await update.message.reply_text(f"Error: {e}")
 
+    # ── /team — role listing ───────────────────────────────────────────
+
     async def cmd_team(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if str(update.effective_user.id) != TG_OWNER:
+        if not _auth(update):
             return
         roles = [
             ("📋", "pm",    "Coordination, status"),
@@ -292,40 +361,337 @@ async def run_bot() -> None:
             lines.append(f"{icon} <code>@{name}</code> — {desc}")
         await send_telegram(context.bot, update.effective_chat.id, "\n".join(lines))
 
+    # ── /logs <role> — last output from a worker ───────────────────────
+
+    async def cmd_logs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not _auth(update):
+            return
+        args = context.args or []
+        if not args:
+            await send_telegram(context.bot, update.effective_chat.id, "Usage: <code>/logs role [lines]</code>")
+            return
+
+        role = resolve_alias(args[0])
+        lines = int(args[1]) if len(args) > 1 else 20
+        pane_map = _load_pane_map()
+        pane = pane_map.get(role)
+        if not pane:
+            await send_telegram(context.bot, update.effective_chat.id, f"Unknown role: <code>{args[0]}</code>")
+            return
+
+        output = _strip_ansi(tmux_capture(pane, lines))
+        display = DISPLAY_NAMES.get(role, role)
+        if output:
+            await send_telegram(context.bot, update.effective_chat.id, f"<b>{display}</b>\n<pre>{output[:3500]}</pre>")
+        else:
+            await send_telegram(context.bot, update.effective_chat.id, f"<b>{display}</b> — <i>no output</i>")
+
+    # ── /board — team whiteboard ───────────────────────────────────────
+
+    async def cmd_board(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not _auth(update):
+            return
+        board_path = RUNTIME_DIR / "board.md"
+        if board_path.is_file():
+            content = board_path.read_text(encoding="utf-8").strip()
+            if content:
+                await send_telegram(context.bot, update.effective_chat.id, content[:3500])
+            else:
+                await send_telegram(context.bot, update.effective_chat.id, "<i>Board is empty.</i>")
+        else:
+            await send_telegram(context.bot, update.effective_chat.id, "<i>No board.md found.</i>")
+
+    # ── /health — system health check ──────────────────────────────────
+
+    async def cmd_health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not _auth(update):
+            return
+        lines = ["<b>Health Check</b>\n"]
+
+        # tmux
+        lines.append(f"tmux: {'✅' if tmux_session_exists() else '❌'}")
+
+        # relay DB
+        db_ok = (RUNTIME_DIR / "relay.db").is_file()
+        lines.append(f"taskbox DB: {'✅' if db_ok else '❌'}")
+
+        # workers
+        pane_map = _load_pane_map()
+        for role, pane in sorted(pane_map.items()):
+            output = tmux_capture(pane, 1)
+            alive = bool(output.strip())
+            display = DISPLAY_NAMES.get(role, role)
+            lines.append(f"  {display}: {'✅' if alive else '❌'}")
+
+        # pending tasks
+        try:
+            result = subprocess.run(
+                ["python3", str(RELAY_SCRIPT), "stats"],
+                capture_output=True, text=True, timeout=5,
+            )
+            stats = json.loads(result.stdout.strip()) if result.stdout.strip() else {}
+            pending = sum(v.get("pending", 0) for v in stats.values()) if isinstance(stats, dict) else 0
+            lines.append(f"pending tasks: {pending}")
+        except Exception:
+            lines.append("pending tasks: ?")
+
+        # scheduled jobs
+        schedule_path = RUNTIME_DIR / "schedule.json"
+        if schedule_path.is_file():
+            try:
+                jobs = json.loads(schedule_path.read_text())
+                active = sum(1 for j in jobs if not j.get("paused"))
+                paused = sum(1 for j in jobs if j.get("paused"))
+                job_str = f"{active} active"
+                if paused:
+                    job_str += f", {paused} paused"
+                lines.append(f"scheduled jobs: {job_str}")
+            except Exception:
+                lines.append("scheduled jobs: ?")
+        else:
+            lines.append("scheduled jobs: none")
+
+        await send_telegram(context.bot, update.effective_chat.id, "\n".join(lines))
+
+    # ── /jobs — list scheduled jobs ────────────────────────────────────
+
+    async def cmd_jobs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not _auth(update):
+            return
+        args = context.args or []
+
+        schedule_path = RUNTIME_DIR / "schedule.json"
+
+        # Sub-commands: cancel, pause, resume
+        if args and args[0] in ("cancel", "pause", "resume"):
+            from scheduler import JobStore
+            store = JobStore(schedule_path)
+
+            if len(args) < 2:
+                await send_telegram(context.bot, update.effective_chat.id, f"Usage: <code>/jobs {args[0]} id</code>")
+                return
+
+            job_id = args[1]
+            if args[0] == "cancel":
+                if store.remove(job_id):
+                    await send_telegram(context.bot, update.effective_chat.id, f"✅ Cancelled <code>{job_id}</code>")
+                else:
+                    await send_telegram(context.bot, update.effective_chat.id, f"Job <code>{job_id}</code> not found")
+            else:
+                result = store.toggle_pause(job_id)
+                if result is None:
+                    await send_telegram(context.bot, update.effective_chat.id, f"Job <code>{job_id}</code> not found")
+                else:
+                    state = "paused" if result else "active"
+                    await send_telegram(context.bot, update.effective_chat.id, f"✅ <code>{job_id}</code> → {state}")
+            return
+
+        # List jobs
+        if not schedule_path.is_file():
+            await send_telegram(context.bot, update.effective_chat.id, "<i>No scheduled jobs.</i>")
+            return
+
+        try:
+            jobs = json.loads(schedule_path.read_text())
+        except Exception:
+            await send_telegram(context.bot, update.effective_chat.id, "<i>No scheduled jobs.</i>")
+            return
+
+        if not jobs:
+            await send_telegram(context.bot, update.effective_chat.id, "<i>No scheduled jobs.</i>")
+            return
+
+        lines = ["<b>Scheduled Jobs</b>\n"]
+        for j in jobs:
+            status = "⏸" if j.get("paused") else "▶️"
+            jtype = j.get("type", "?")
+            spec = j.get("spec", "?")
+            action = j.get("action", "?")
+            target = j.get("target", "?")
+            content = j.get("content", "")
+            runs = j.get("run_count", 0)
+            jid = j.get("id", "?")
+
+            content_short = (content[:30] + "…") if len(content) > 30 else content
+            lines.append(
+                f"{status} <code>{jid}</code> {jtype} {spec} → {action} {target}\n"
+                f"    {content_short} (×{runs})"
+            )
+
+        await send_telegram(context.bot, update.effective_chat.id, "\n".join(lines))
+
+    # ── /schedule — create a scheduled job ─────────────────────────────
+
+    async def cmd_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not _auth(update):
+            return
+        args = context.args or []
+
+        if len(args) < 3:
+            await send_telegram(
+                context.bot, update.effective_chat.id,
+                "<b>Schedule</b>\n\n"
+                "<code>/schedule every 30m @pm Check tasks</code>\n"
+                "<code>/schedule at 15:00 @py Review PR</code>\n"
+                "<code>/schedule every 1h run git fetch</code>\n"
+                "<code>/schedule every 10m agent taskbox-listener Check inbox</code>\n"
+                "<code>/schedule cron 0 9 * * MON-FRI @ba Standup</code>\n",
+            )
+            return
+
+        from scheduler import JobStore, Scheduler, resolve_agent
+
+        job_type = args[0].lower()
+        if job_type not in ("at", "every", "cron"):
+            await send_telegram(context.bot, update.effective_chat.id, f"Invalid type: <code>{job_type}</code>. Use: at, every, cron")
+            return
+
+        # Parse spec
+        if job_type == "cron":
+            if len(args) < 8:
+                await send_telegram(context.bot, update.effective_chat.id, "Cron needs 5 fields + target + message")
+                return
+            spec = " ".join(args[1:6])
+            rest = args[6:]
+        else:
+            spec = args[1]
+            rest = args[2:]
+
+        if not rest:
+            await send_telegram(context.bot, update.effective_chat.id, "Missing target (@role, run, or agent)")
+            return
+
+        first = rest[0].lower()
+
+        if first.startswith("@"):
+            action = "send"
+            role = resolve_alias(first[1:])
+            target = role
+            content = " ".join(rest[1:])
+        elif first == "run":
+            action = "run"
+            target = " ".join(rest[1:])
+            content = ""
+        elif first == "agent":
+            action = "agent"
+            if len(rest) < 3:
+                await send_telegram(context.bot, update.effective_chat.id, "Usage: agent <i>name</i> <i>prompt</i>")
+                return
+            target = rest[1]
+            content = " ".join(rest[2:])
+            if not resolve_agent(target, OCTOBOTS_DIR, RUNTIME_DIR):
+                await send_telegram(context.bot, update.effective_chat.id, f"Agent not found: <code>{target}</code>")
+                return
+        else:
+            await send_telegram(context.bot, update.effective_chat.id, f"Expected @role, run, or agent — got: <code>{first}</code>")
+            return
+
+        store = JobStore(RUNTIME_DIR / "schedule.json")
+        scheduler = Scheduler(store=store, taskbox=None, tmux=None, relay_script=RELAY_SCRIPT,
+                              octobots_dir=OCTOBOTS_DIR, runtime_dir=RUNTIME_DIR)
+        try:
+            job = scheduler.create_job(job_type, spec, action, target, content)
+            from datetime import datetime
+            next_dt = datetime.fromisoformat(job.next_run)
+            await send_telegram(
+                context.bot, update.effective_chat.id,
+                f"✅ Scheduled <code>{job.id}</code> {job_type} {spec} → {action} {target}\n"
+                f"Next: {next_dt.strftime('%Y-%m-%d %H:%M UTC')}",
+            )
+        except ValueError as e:
+            await send_telegram(context.bot, update.effective_chat.id, f"Error: {e}")
+
+    # ── /loop — shortcut for /schedule every ───────────────────────────
+
+    async def cmd_loop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not _auth(update):
+            return
+        args = context.args or []
+        if len(args) < 3:
+            await send_telegram(
+                context.bot, update.effective_chat.id,
+                "<b>Loop</b> (shortcut for <code>/schedule every</code>)\n\n"
+                "<code>/loop 30m @pm Check tasks</code>\n"
+                "<code>/loop 5m run ./health-check.sh</code>\n"
+                "<code>/loop 10m agent taskbox-listener Check inbox</code>\n",
+            )
+            return
+        # Reuse schedule handler with "every" prepended
+        context.args = ["every"] + list(args)
+        await cmd_schedule(update, context)
+
+    # ── /restart <role> — restart a worker ─────────────────────────────
+
+    async def cmd_restart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not _auth(update):
+            return
+        args = context.args or []
+        if not args:
+            await send_telegram(context.bot, update.effective_chat.id, "Usage: <code>/restart role</code>")
+            return
+
+        role = resolve_alias(args[0])
+        pane_map = _load_pane_map()
+
+        if role == "all":
+            targets = list(pane_map.keys())
+        elif role in pane_map:
+            targets = [role]
+        else:
+            await send_telegram(context.bot, update.effective_chat.id, f"Unknown role: <code>{args[0]}</code>")
+            return
+
+        # Send restart request via taskbox (supervisor picks it up)
+        for r in targets:
+            try:
+                subprocess.run(
+                    ["python3", str(RELAY_SCRIPT), "send", "--from", "telegram", "--to", "supervisor", f"restart {r}"],
+                    capture_output=True, text=True, timeout=10,
+                )
+            except Exception:
+                pass
+
+        display = ", ".join(DISPLAY_NAMES.get(r, r) for r in targets)
+        await send_telegram(context.bot, update.effective_chat.id, f"🔄 Restart requested: {display}")
+
+    # ── /help — full command reference ─────────────────────────────────
+
+    async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not _auth(update):
+            return
+        await send_telegram(
+            context.bot, update.effective_chat.id,
+            "<b>Commands</b>\n\n"
+            "<b>Team</b>\n"
+            "<code>@role message</code> — send to a worker\n"
+            "/status — worker states\n"
+            "/tasks — taskbox queue stats\n"
+            "/team — list roles and aliases\n"
+            "/logs <i>role</i> — last output from a worker\n"
+            "/board — team whiteboard\n"
+            "/health — system health check\n"
+            "/restart <i>role|all</i> — restart a worker\n\n"
+            "<b>Scheduling</b>\n"
+            "/jobs — list scheduled jobs\n"
+            "/jobs cancel|pause|resume <i>id</i>\n"
+            "/schedule <i>type spec @role msg</i>\n"
+            "/loop <i>interval @role msg</i>\n\n"
+            "<b>Examples</b>\n"
+            "<code>/schedule every 30m @pm Check tasks</code>\n"
+            "<code>/loop 5m run ./health-check.sh</code>\n"
+            "<code>/jobs cancel abc123</code>\n",
+        )
+
+    # ── Message handler — @role routing ────────────────────────────────
+
     async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if str(update.effective_user.id) != TG_OWNER:
+        if not _auth(update):
             await update.message.reply_text("Unauthorized.")
             return
 
         text = update.message.text or ""
         if not text.strip():
             return
-
-        # Shorthand aliases for role names
-        ALIASES = {
-            "pm": "project-manager",
-            "max": "project-manager",
-            "ba": "ba",
-            "alex": "ba",
-            "tl": "tech-lead",
-            "rio": "tech-lead",
-            "py": "python-dev",
-            "js": "js-dev",
-            "jay": "js-dev",
-            "qa": "qa-engineer",
-            "sage": "qa-engineer",
-            "kit": "scout",
-        }
-
-        DISPLAY_NAMES = {
-            "project-manager": "📋 pm",
-            "ba": "📝 ba",
-            "tech-lead": "🏗️ tl",
-            "python-dev": "🐍 py",
-            "js-dev": "⚡ js",
-            "qa-engineer": "🧪 qa",
-            "scout": "🔍 scout",
-        }
 
         # Route by: 1) reply to a role's message, 2) @role prefix, 3) default to PM
         target_pane = PM_PANE
@@ -376,12 +742,38 @@ async def run_bot() -> None:
                 f"Failed to reach <b>{target_label}</b> — pane <code>{target_pane}</code> not found in tmux.",
             )
 
-    # Build app
+    # ── Build app and register handlers ────────────────────────────────
+
     app = Application.builder().token(TG_TOKEN).build()
+
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("tasks", cmd_tasks))
     app.add_handler(CommandHandler("team", cmd_team))
+    app.add_handler(CommandHandler("logs", cmd_logs))
+    app.add_handler(CommandHandler("board", cmd_board))
+    app.add_handler(CommandHandler("health", cmd_health))
+    app.add_handler(CommandHandler("jobs", cmd_jobs))
+    app.add_handler(CommandHandler("schedule", cmd_schedule))
+    app.add_handler(CommandHandler("loop", cmd_loop))
+    app.add_handler(CommandHandler("restart", cmd_restart))
+    app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    # Set bot command menu (shows in Telegram UI)
+    await app.bot.set_my_commands([
+        BotCommand("status", "Worker states"),
+        BotCommand("tasks", "Taskbox queue stats"),
+        BotCommand("team", "List roles and aliases"),
+        BotCommand("logs", "Last output from a worker"),
+        BotCommand("board", "Team whiteboard"),
+        BotCommand("health", "System health check"),
+        BotCommand("jobs", "Scheduled jobs"),
+        BotCommand("schedule", "Create a scheduled job"),
+        BotCommand("loop", "Recurring schedule shortcut"),
+        BotCommand("restart", "Restart a worker"),
+        BotCommand("help", "Command reference"),
+    ])
 
     logger.info("Telegram bridge started — tmux %s:%s", TMUX_SESSION, PM_PANE)
     await app.initialize()

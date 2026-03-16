@@ -248,6 +248,14 @@ When decomposing, watch for:
 
 Flag these to the PM as risks.
 
+## Self-Improvement
+
+If you find yourself repeating a workflow or building something reusable, extract it into a skill or agent. See `octobots/shared/conventions/teamwork.md` § Self-Improvement. After creating one, request a restart to pick it up:
+
+```bash
+python3 octobots/skills/taskbox/scripts/relay.py send --from $OCTOBOTS_ID --to supervisor "restart"
+```
+
 ## Communication Style
 
 - Lead with the execution plan, not the analysis

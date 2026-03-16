@@ -83,7 +83,8 @@ No taskbox, no PM intermediary. Direct Bot API call.
 
 ```
                     Supervisor (supervisor.sh)
-                    polls taskbox, manages tmux
+                    polls taskbox, manages tmux,
+                    runs scheduled jobs
                               │
                     tmux session "octobots"
                     ┌─────────┼──────────────┐
@@ -100,10 +101,54 @@ No taskbox, no PM intermediary. Direct Bot API call.
                   └── python-dev-issue-103 preserved on disk
 ```
 
-- One Claude process per role (never restarted)
+- One Claude process per role
 - `/resume <session>` swaps context per GitHub issue
 - Previous sessions preserved — resumable anytime
 - Supervisor extracts `#NNN` from taskbox messages → session name
+- Workers can request restart via taskbox → supervisor relaunches fresh
+
+## Scheduling & Loops
+
+The supervisor includes a built-in scheduler for recurring and one-shot jobs. No LLM involved — jobs are defined and triggered directly from the supervisor.
+
+```
+Supervisor poll loop (every 15s)
+  ├── Check scheduled jobs (schedule.json)
+  │     ├── @role messages → taskbox send
+  │     ├── run commands → shell subprocess
+  │     └── agent invocations → claude subprocess
+  ├── Check restart requests → relaunch workers
+  ├── Poll taskbox → route to workers
+  └── Poll GitHub issues → route to PM
+```
+
+### Job Types
+
+| Type | Spec Examples | Behavior |
+|------|--------------|----------|
+| `at` | `15:00`, `in 2h` | One-shot, removed after execution |
+| `every` | `5m`, `1h`, `1d` | Recurring interval |
+| `cron` | `0 9 * * MON-FRI` | Standard 5-field cron expression |
+
+### Job Actions
+
+| Action | Target | What Happens |
+|--------|--------|-------------|
+| `@role` | Role alias | Sends a taskbox message to the worker |
+| `run` | Shell command | Runs as subprocess, captures output |
+| `agent` | Agent name | Spawns `claude -p` with agent's AGENT.md |
+
+Jobs persist to `.octobots/schedule.json` across supervisor restarts.
+
+### Worker Self-Restart
+
+Workers can request their own restart by sending a taskbox message to `supervisor`:
+
+```
+relay.py send --from $OCTOBOTS_ID --to supervisor "restart"
+```
+
+The supervisor picks this up on the next poll cycle and relaunches the worker. This is the mechanism for workers to pick up newly added skills or agents (Claude Code discovers them at session start, not mid-conversation).
 
 ## Audit Trail
 

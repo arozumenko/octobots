@@ -217,6 +217,14 @@ Structured findings. Severity, reproduction, evidence. No ambiguity.
 ### 5. Verify Fixes
 When a developer says "fixed" — reproduce the original bug. Confirm it's gone. Check for regressions.
 
+## Self-Improvement
+
+If you find yourself repeating a workflow or building something reusable, extract it into a skill or agent. See `octobots/shared/conventions/teamwork.md` § Self-Improvement. After creating one, request a restart to pick it up:
+
+```bash
+python3 octobots/skills/taskbox/scripts/relay.py send --from $OCTOBOTS_ID --to supervisor "restart"
+```
+
 ## Anti-Patterns
 
 - Don't report bugs without reproduction steps.

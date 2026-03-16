@@ -79,9 +79,59 @@ venv/bin/python octobots/scripts/telegram-bridge.py
 /clear <role>        Send /clear to a worker
 /board               Show team board (BOARD.md)
 /health              System health check
+/schedule            Schedule a one-shot or recurring job
+/loop                Shortcut for /schedule every
+/jobs                List or manage scheduled jobs
 /stop                Graceful shutdown
 /help                Command reference
 ```
+
+### Scheduling & Loops
+
+The supervisor can run jobs on a schedule — send messages to workers, run shell commands, or invoke agents. Same `@role` syntax as Telegram.
+
+```bash
+# Send a recurring task to a role
+/schedule every 30m @pm Check status of all tasks
+/schedule every 1h @qa Run regression tests on staging
+
+# One-shot at a specific time
+/schedule at 15:00 @py Review PR #42
+
+# Cron expressions (5-field: min hour dom month dow)
+/schedule cron 0 9 * * MON-FRI @ba Daily standup report
+
+# Run a shell command on an interval
+/schedule every 1h run git fetch --all
+
+# Invoke a Claude Code agent
+/schedule every 10m agent taskbox-listener Check inbox
+
+# /loop is a shortcut for /schedule every
+/loop 30m @pm Check task progress
+/loop 5m run ./scripts/health-check.sh
+```
+
+Manage jobs:
+```bash
+/jobs                    # List all scheduled jobs
+/jobs cancel <id>        # Remove a job
+/jobs pause <id>         # Temporarily disable
+/jobs resume <id>        # Re-enable a paused job
+```
+
+Jobs are persisted to `.octobots/schedule.json` and survive supervisor restarts.
+
+### Worker Self-Restart
+
+Workers can request their own restart via taskbox. This is useful when new skills or agents have been added and the worker needs to pick them up (Claude Code discovers skills/agents at session start).
+
+From inside a worker session:
+```bash
+python3 octobots/skills/taskbox/scripts/relay.py send --from $OCTOBOTS_ID --to supervisor "restart"
+```
+
+The supervisor picks up the request on the next poll cycle (within 15s), sends `/exit` to the worker's pane, and relaunches it fresh.
 
 ### Watching Workers in tmux
 
@@ -134,13 +184,32 @@ Messages go to PM (Max) by default. Use `@role` to address others:
 
 ```
 what's the status?              → Max (PM)
-@python-dev fix the login bug   → Py
-@qa-engineer test issue #103    → Sage
-@tech-lead decompose #100       → Rio
+@py fix the login bug           → Py
+@qa test issue #103             → Sage
+@tl decompose #100              → Rio
 @ba clarify the auth story      → Alex
 ```
 
-Bot commands: `/status`, `/team`, `/start`
+### Telegram Commands
+
+All supervisor commands are available as Telegram slash commands:
+
+| Command | Description |
+|---------|-------------|
+| `/status` | Worker states and last output |
+| `/tasks` | Taskbox queue stats |
+| `/team` | List roles and aliases |
+| `/logs <role>` | Last output from a worker |
+| `/board` | Team whiteboard |
+| `/health` | System health check |
+| `/jobs` | List scheduled jobs |
+| `/jobs cancel\|pause\|resume <id>` | Manage a job |
+| `/schedule <type> <spec> @role msg` | Create a scheduled job |
+| `/loop <interval> @role msg` | Recurring schedule shortcut |
+| `/restart <role\|all>` | Restart a worker |
+| `/help` | Full command reference |
+
+Commands appear in Telegram's command menu (the `/` button).
 
 ## Framework vs Runtime
 
@@ -149,7 +218,7 @@ octobots/              ← framework (git pull for updates, read-only)
 ├── roles/               base role templates (SOUL.md + CLAUDE.md)
 ├── skills/              base skills
 ├── shared/              conventions, agents
-└── scripts/             supervisor, bridge, init, relay
+└── scripts/             supervisor, bridge, scheduler, roles, relay
 
 .octobots/             ← runtime (project-specific, workers read/write)
 ├── board.md             team whiteboard (all roles)
@@ -165,6 +234,7 @@ octobots/              ← framework (git pull for updates, read-only)
 │   ├── js-dev/            own repo clones + shared node_modules
 │   └── qa-engineer/       own repo clones
 ├── relay.db             taskbox database
+├── schedule.json        scheduled jobs (persistent)
 └── profile.md           scout output
 ```
 

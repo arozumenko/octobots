@@ -83,6 +83,29 @@ Code-writing roles (python-dev, js-dev, qa-engineer) get their own isolated envi
 
 No file conflicts between parallel workers. PRs are where integration happens.
 
+## Scheduling & Loops
+
+The supervisor runs jobs on a schedule — same `@role` syntax as Telegram. No LLM involved.
+
+```bash
+/schedule every 30m @pm Check status of all tasks
+/schedule at 15:00 @py Review PR #42
+/schedule cron 0 9 * * MON-FRI @ba Daily standup report
+/schedule every 1h run git fetch --all
+/schedule every 10m agent taskbox-listener Check inbox
+
+/loop 30m @qa Run regression tests       # shortcut for /schedule every
+
+/jobs                                     # list all
+/jobs cancel <id>                         # remove
+/jobs pause <id>                          # disable temporarily
+```
+
+Workers can self-restart to pick up new skills/agents:
+```bash
+relay.py send --from $OCTOBOTS_ID --to supervisor "restart"
+```
+
 ## Structure
 
 ```
@@ -98,8 +121,10 @@ octobots/                            ← FRAMEWORK (git pull, read-only)
 │   └── conventions/                   Teamwork, audit trail, sessions
 ├── skills/                            10 shared skills
 └── scripts/
-    ├── supervisor.py                  Rich TUI supervisor
+    ├── supervisor.py                  Rich TUI supervisor + scheduler
     ├── telegram-bridge.py             Telegram ↔ tmux bridge
+    ├── scheduler.py                   Schedule/loop engine
+    ├── roles.py                       Shared role aliases (@pm, @qa, etc.)
     ├── notify-user.sh                 Any role → Telegram notification
     ├── init-project.sh                Initialize .octobots/ for a project
     └── requirements.txt               Python deps (rich, telegram, dotenv)
@@ -115,6 +140,7 @@ octobots/                            ← FRAMEWORK (git pull, read-only)
 │   ├── js-dev/                          Own repo clones
 │   └── qa-engineer/                     Own repo clones
 ├── relay.db                           Taskbox database
+├── schedule.json                      Scheduled jobs (persistent)
 └── profile.md, conventions.md, ...    Scout output
 ```
 

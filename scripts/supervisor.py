@@ -19,6 +19,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +31,9 @@ from rich.prompt import Prompt
 from rich.table import Table
 from rich.text import Text
 from rich import box
+
+from scheduler import JobStore, Scheduler, JobType, JobAction, parse_interval, format_interval
+from roles import ROLE_ALIASES, ROLE_DISPLAY, resolve_alias
 
 # ── Paths ───────────────────────────────────────────────────────────────────
 
@@ -298,6 +302,18 @@ class Supervisor:
         self.launched: set[str] = set()
         self._running = True
 
+        # Scheduler
+        self.job_store = JobStore(RUNTIME_DIR / "schedule.json")
+        self.scheduler = Scheduler(
+            store=self.job_store,
+            taskbox=self.taskbox,
+            tmux=self.tmux,
+            relay_script=RELAY_SCRIPT,
+            octobots_dir=OCTOBOTS_DIR,
+            runtime_dir=RUNTIME_DIR,
+            on_event=self._on_scheduled_event,
+        )
+
     def preflight(self) -> bool:
         ok = True
         for cmd in ["tmux", "claude", "python3", "gh", "git"]:
@@ -406,7 +422,24 @@ class Supervisor:
         self.tmux.send_keys(pane, prompt)
         console.print(f"[green]→[/green] {role}: task from {sender} ({msg_id[:8]})")
 
+    def _on_scheduled_event(self, job: Any, result: str) -> None:
+        """Called when a scheduled job executes."""
+        type_label = job.type.value
+        console.print(
+            f"[magenta]⏰[/magenta] [{type_label}] {job.action.value} → "
+            f"{job.target}: {result}"
+        )
+
     def poll_once(self) -> None:
+        # Check scheduled jobs
+        try:
+            self.scheduler.check()
+        except Exception as e:
+            console.print(f"[red]Scheduler error: {e}[/red]")
+
+        # Check for restart requests from workers
+        self._poll_restart_requests()
+
         # Poll taskbox
         for role in self.workers:
             msgs = self.taskbox.inbox(role, limit=1)
@@ -415,6 +448,36 @@ class Supervisor:
 
         # Poll GitHub for issues assigned to the bot
         self._poll_github_issues()
+
+    def _poll_restart_requests(self) -> None:
+        """Check for restart requests via taskbox (from workers or telegram)."""
+        msgs = self.taskbox.inbox("supervisor", limit=5)
+        for msg in msgs:
+            if not self.taskbox.claim(msg["id"]):
+                continue
+            sender = msg["sender"]
+            content = msg["content"].strip().lower()
+
+            # "restart" (self-restart) or "restart <role>" (from telegram/other)
+            if content in ("restart", "restart me", "reload"):
+                target = sender
+            elif content.startswith("restart "):
+                target = resolve_alias(content.split(" ", 1)[1].strip())
+            else:
+                continue
+
+            if target in self.workers or target == "all":
+                console.print(f"[yellow]🔄 {target} restart requested by {sender}[/yellow]")
+                self.cmd_restart(target)
+
+            # Ack the message
+            conn = self.taskbox._db()
+            conn.execute(
+                "UPDATE messages SET status='done', response='restarted', updated_at=? WHERE id=?",
+                (time.time(), msg["id"]),
+            )
+            conn.commit()
+            conn.close()
 
     def _poll_github_issues(self) -> None:
         """Check for GitHub issues assigned to the bot and route to PM."""
@@ -625,6 +688,15 @@ class Supervisor:
         pending = self.taskbox.pending_count()
         table.add_row("pending tasks", f"[yellow]{pending}[/yellow]" if pending else "[green]0[/green]")
 
+        # scheduled jobs
+        jobs = self.job_store.load()
+        active_jobs = sum(1 for j in jobs if not j.paused)
+        paused_jobs = sum(1 for j in jobs if j.paused)
+        job_status = f"[green]{active_jobs} active[/green]"
+        if paused_jobs:
+            job_status += f", [yellow]{paused_jobs} paused[/yellow]"
+        table.add_row("scheduled jobs", job_status if jobs else "[dim]none[/dim]")
+
         console.print(table)
 
     def cmd_bridge(self, restart: bool = False) -> None:
@@ -664,6 +736,212 @@ class Supervisor:
         )
         console.print(f"[green]✓ Telegram bridge started (PID: {self._bridge_proc.pid})[/green]")
 
+    def _parse_schedule_target(self, rest: list[str]) -> tuple[str, str, str] | None:
+        """Parse the target portion of a schedule/loop command.
+
+        Supports:
+            @role <message>          → send to role via taskbox
+            run <command>            → shell command
+            agent <name> <prompt>    → invoke Claude Code agent
+
+        Returns (action, target, content) or None on error.
+        """
+        if not rest:
+            self._print_schedule_help()
+            return None
+
+        first = rest[0].lower()
+
+        # @role shorthand — send taskbox message (same as Telegram @pm, @qa, etc.)
+        if first.startswith("@"):
+            role_alias = first[1:]
+            role = resolve_alias(role_alias)
+            if role not in self.workers and role != "all":
+                available = sorted(set(a for a, r in ROLE_ALIASES.items() if r in self.workers and len(a) <= 3))
+                console.print(f"[red]Unknown role: @{role_alias}. Available: {', '.join(f'@{a}' for a in available)}[/red]")
+                return None
+            content = " ".join(rest[1:])
+            if not content:
+                console.print("[red]Missing message after @role[/red]")
+                return None
+            return ("send", role, content)
+
+        # run <command>
+        if first == "run":
+            target = " ".join(rest[1:])
+            if not target:
+                console.print("[red]Missing command to run[/red]")
+                return None
+            return ("run", target, "")
+
+        # agent <name> <prompt>
+        if first == "agent":
+            if len(rest) < 3:
+                console.print("[red]Usage: agent <agent-name> <prompt>[/red]")
+                return None
+            target = rest[1]
+            content = " ".join(rest[2:])
+            from scheduler import resolve_agent
+            if not resolve_agent(target, OCTOBOTS_DIR, RUNTIME_DIR):
+                agents = []
+                for base in [RUNTIME_DIR / "agents", OCTOBOTS_DIR / "shared" / "agents"]:
+                    if base.is_dir():
+                        for d in sorted(base.iterdir()):
+                            if (d / "AGENT.md").is_file() and d.name not in agents:
+                                agents.append(d.name)
+                console.print(f"[red]Agent not found: {target}. Available: {', '.join(agents) or 'none'}[/red]")
+                return None
+            return ("agent", target, content)
+
+        console.print(f"[red]Expected @role, run, or agent — got: {first}[/red]")
+        self._print_schedule_help()
+        return None
+
+    def _print_schedule_help(self) -> None:
+        console.print(
+            "[dim]Usage:\n"
+            "  /schedule <at|every|cron> <spec> @<role> <message>\n"
+            "  /schedule <at|every|cron> <spec> run <command>\n"
+            "  /schedule <at|every|cron> <spec> agent <name> <prompt>\n\n"
+            "Examples:\n"
+            "  /schedule every 30m @pm Check status of all tasks\n"
+            "  /schedule at 15:00 @py Review PR #42\n"
+            "  /schedule every 1h run git fetch --all\n"
+            "  /schedule every 10m agent taskbox-listener Check inbox\n"
+            "  /schedule cron 0 9 * * MON-FRI @ba Daily standup report\n\n"
+            "  /loop 30m @pm Check task progress\n"
+            "  /loop 5m run ./scripts/health-check.sh\n"
+            "  /loop 10m agent rca-investigator Check for flaky tests[/dim]"
+        )
+
+    def cmd_schedule(self, args: list[str]) -> None:
+        """Handle /schedule command.
+
+        Usage:
+            /schedule <at|every|cron> <spec> @<role> <message>
+            /schedule <at|every|cron> <spec> run <command>
+            /schedule <at|every|cron> <spec> agent <name> <prompt>
+        """
+        if len(args) < 3:
+            self._print_schedule_help()
+            return
+
+        job_type = args[0].lower()
+        if job_type not in ("at", "every", "cron"):
+            console.print(f"[red]Invalid type: {job_type}. Use: at, every, cron[/red]")
+            return
+
+        # Parse spec — for cron expressions, the spec is 5 fields
+        if job_type == "cron":
+            if len(args) < 8:  # cron + 5 fields + target + message
+                console.print("[red]Cron needs 5 fields: /schedule cron <min> <hour> <dom> <month> <dow> @<role> <message>[/red]")
+                return
+            spec = " ".join(args[1:6])
+            rest = args[6:]
+        else:
+            spec = args[1]
+            rest = args[2:]
+
+        parsed = self._parse_schedule_target(rest)
+        if not parsed:
+            return
+        action, target, content = parsed
+
+        try:
+            job = self.scheduler.create_job(job_type, spec, action, target, content)
+            next_dt = datetime.fromisoformat(job.next_run)
+            console.print(
+                f"[green]✓ Scheduled[/green] [{job.id}] {job.type.value} {job.spec} "
+                f"→ {action} {target}\n"
+                f"  Next run: [yellow]{next_dt.strftime('%Y-%m-%d %H:%M UTC')}[/yellow]"
+            )
+        except ValueError as e:
+            console.print(f"[red]Error: {e}[/red]")
+
+    def cmd_loop(self, args: list[str]) -> None:
+        """Handle /loop — shortcut for /schedule every.
+
+        Usage:
+            /loop <interval> @<role> <message>
+            /loop <interval> run <command>
+            /loop <interval> agent <name> <prompt>
+        """
+        if len(args) < 3:
+            self._print_schedule_help()
+            return
+
+        self.cmd_schedule(["every"] + args)
+
+    def cmd_jobs(self, args: list[str]) -> None:
+        """Handle /jobs — list, cancel, pause, resume scheduled jobs.
+
+        Usage:
+            /jobs                  — list all
+            /jobs cancel <id>      — remove a job
+            /jobs pause <id>       — pause a job
+            /jobs resume <id>      — resume a paused job
+        """
+        if not args:
+            # List all jobs
+            jobs = self.job_store.load()
+            if not jobs:
+                console.print("[dim]No scheduled jobs.[/dim]")
+                return
+
+            table = Table(title="Scheduled Jobs", box=box.ROUNDED)
+            table.add_column("ID", style="cyan")
+            table.add_column("Type", style="blue")
+            table.add_column("Spec", style="white")
+            table.add_column("Action", style="green")
+            table.add_column("Target", style="yellow")
+            table.add_column("Content", style="white", max_width=30)
+            table.add_column("Next Run", style="magenta")
+            table.add_column("Runs", style="dim")
+            table.add_column("Status")
+
+            for j in jobs:
+                try:
+                    next_dt = datetime.fromisoformat(j.next_run)
+                    next_str = next_dt.strftime("%m-%d %H:%M")
+                except (ValueError, TypeError):
+                    next_str = "?"
+
+                status = "[yellow]paused[/yellow]" if j.paused else "[green]active[/green]"
+                content_short = (j.content[:27] + "...") if len(j.content) > 30 else j.content
+
+                table.add_row(
+                    j.id, j.type.value, j.spec, j.action.value,
+                    j.target, content_short, next_str,
+                    str(j.run_count), status,
+                )
+
+            console.print(table)
+            return
+
+        action = args[0].lower()
+        if action == "cancel":
+            if len(args) < 2:
+                console.print("[red]Usage: /jobs cancel <id>[/red]")
+                return
+            if self.job_store.remove(args[1]):
+                console.print(f"[green]✓ Cancelled job {args[1]}[/green]")
+            else:
+                console.print(f"[red]Job {args[1]} not found[/red]")
+
+        elif action in ("pause", "resume"):
+            if len(args) < 2:
+                console.print(f"[red]Usage: /jobs {action} <id>[/red]")
+                return
+            result = self.job_store.toggle_pause(args[1])
+            if result is None:
+                console.print(f"[red]Job {args[1]} not found[/red]")
+            else:
+                state = "paused" if result else "active"
+                console.print(f"[green]✓ Job {args[1]} is now {state}[/green]")
+
+        else:
+            console.print(f"[red]Unknown action: {action}. Use: cancel, pause, resume[/red]")
+
     def cmd_help(self) -> None:
         table = Table(title="Commands", box=box.ROUNDED, show_header=False)
         table.add_column("Command", style="cyan")
@@ -680,6 +958,9 @@ class Supervisor:
             ("/board", "Show team board"),
             ("/bridge", "Start Telegram bridge (background)"),
             ("/health", "System health check"),
+            ("/schedule <type> <spec> @role msg", "Schedule a job (at/every/cron)"),
+            ("/loop <interval> @role msg", "Shortcut for /schedule every"),
+            ("/jobs [cancel|pause|resume <id>]", "List or manage scheduled jobs"),
             ("/stop", "Graceful shutdown"),
             ("/help", "This help"),
         ]
@@ -725,6 +1006,12 @@ class Supervisor:
             self.cmd_bridge(restart="restart" in args)
         elif cmd == "/health":
             self.cmd_health()
+        elif cmd == "/schedule":
+            self.cmd_schedule(args)
+        elif cmd == "/loop":
+            self.cmd_loop(args)
+        elif cmd == "/jobs":
+            self.cmd_jobs(args)
         elif cmd in ("/stop", "/quit", "/exit"):
             return False
         elif cmd == "/help":

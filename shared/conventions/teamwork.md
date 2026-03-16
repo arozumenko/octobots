@@ -104,3 +104,94 @@ The script reads `OCTOBOTS_ID` from env to tag the message with your role name.
 - Significant milestone
 
 **Don't notify on:** every step, routine status, inter-role handoffs (use taskbox for those).
+
+## Self-Improvement
+
+You can create new skills and agents to extend your own capabilities or the team's. When you notice a repeating pattern, a workflow that could be automated, or a gap in the team's tooling — build it.
+
+### Creating a Skill
+
+If you find yourself repeating a multi-step workflow, extract it into a skill:
+
+```bash
+# Create in project-specific skills (shared with all roles)
+mkdir -p .octobots/skills/my-new-skill
+```
+
+Write `SKILL.md` with YAML frontmatter and instructions. See `octobots/docs/skill-spec.md` for the full format:
+
+```yaml
+---
+name: my-new-skill
+description: >-
+  What this skill does and when to use it.
+  Use when the user asks to "do X" or "fix Y".
+---
+
+# My New Skill
+
+Steps, commands, decision trees.
+```
+
+Then symlink it to your role (and any other roles that should have it):
+
+```bash
+ln -s ../../../../.octobots/skills/my-new-skill roles/<role>/.claude/skills/my-new-skill
+```
+
+### Creating an Agent
+
+For specialized sub-tasks that benefit from isolation (separate context window, specific model):
+
+```bash
+mkdir -p .octobots/agents/my-agent
+```
+
+Write `AGENT.md`:
+
+```yaml
+---
+name: my-agent
+description: >-
+  What this agent does. Use when [trigger conditions].
+model: sonnet
+tools: [Read, Grep, Glob, Bash]
+---
+
+# My Agent
+
+Full instructions for the agent's task.
+```
+
+Symlink to roles that should have access:
+
+```bash
+ln -s ../../../../.octobots/agents/my-agent roles/<role>/.claude/agents/my-agent
+```
+
+### When to Create What
+
+| You notice... | Create a... |
+|--------------|-------------|
+| Repeating multi-step workflow | Skill |
+| Task that needs a separate context/model | Agent |
+| Pattern that all roles should follow | Convention (in `shared/conventions/`) |
+| Project-specific knowledge | Entry in your MEMORY.md |
+
+### Picking Up New Capabilities
+
+Claude Code discovers skills and agents **at session start only** — not mid-conversation. After creating a new skill or agent, request a restart:
+
+```bash
+python3 octobots/skills/taskbox/scripts/relay.py send --from $OCTOBOTS_ID --to supervisor "restart"
+```
+
+The supervisor will exit your session and relaunch you fresh. On restart you'll automatically discover everything in `.claude/skills/` and `.claude/agents/`.
+
+### Guidelines
+
+- **Name clearly** — `deploy-staging` not `helper`. The name is how others find it.
+- **Write good descriptions** — include trigger phrases so the agent knows when to activate the skill.
+- **Keep SKILL.md under 500 lines** — split details into `references/` subdirectory.
+- **Test before sharing** — verify the skill works in your own session before symlinking to other roles.
+- **Announce to the team** — post on `.octobots/board.md` when you create something useful so other roles know about it.

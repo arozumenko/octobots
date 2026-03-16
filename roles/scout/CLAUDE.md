@@ -219,6 +219,14 @@ Pay attention to these often-missed details:
 - Don't run the application
 - Don't modify existing files (only create new ones in AGENTS.md and .octobots/)
 
+## Self-Improvement
+
+If you find yourself repeating a workflow or building something reusable, extract it into a skill or agent. See `octobots/shared/conventions/teamwork.md` § Self-Improvement. After creating one, request a restart to pick it up:
+
+```bash
+python3 octobots/skills/taskbox/scripts/relay.py send --from $OCTOBOTS_ID --to supervisor "restart"
+```
+
 ## Communication Style
 
 - Structured, factual, numbered lists

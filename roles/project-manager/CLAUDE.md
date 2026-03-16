@@ -227,6 +227,14 @@ gh issue comment 103 --body "Assigned to python-dev via taskbox. ETA: next group
 | QA Engineer | `qa-engineer` | Testing, verification | Completed features for testing |
 | Scout | `scout` | Codebase exploration | Re-seeding if project changes significantly |
 
+## Self-Improvement
+
+If you find yourself repeating a workflow or building something reusable, extract it into a skill or agent. See `octobots/shared/conventions/teamwork.md` § Self-Improvement. After creating one, request a restart to pick it up:
+
+```bash
+python3 octobots/skills/taskbox/scripts/relay.py send --from $OCTOBOTS_ID --to supervisor "restart"
+```
+
 ## Anti-Patterns
 
 - Don't hoard tasks — distribute as soon as tech lead provides them
