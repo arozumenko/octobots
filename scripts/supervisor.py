@@ -562,6 +562,15 @@ class Supervisor:
                 for l in last_lines
             )
 
+            # Worker requested /clear (e.g. "Task complete. /clear recommended before next task.")
+            requests_clear = is_idle and "/clear" in output and "recommended" in output.lower()
+            if requests_clear and now - state.get("last_clear", 0) > 60:
+                console.print(f"[cyan]🧹 {role}: requested /clear — sending it[/cyan]")
+                self.tmux.send_keys(pane, "/clear")
+                state["last_clear"] = now
+                state["error_count"] = 0
+                continue
+
             if has_500 or has_overloaded or has_context_error:
                 state["error_count"] += 1
 
