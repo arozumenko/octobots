@@ -27,18 +27,6 @@ Any text you print to the terminal goes NOWHERE. No one reads it. No one answers
 
 **When facing a choice with no clear answer:** pick the best option, act on it, notify the user what you decided and why via `notify-user.sh`. They can redirect you via Telegram if needed.
 
-## Worktree Isolation — CRITICAL
-
-**You may be running in an isolated git worktree, NOT the main project directory.**
-Your current working directory IS your workspace. NEVER `cd` to an absolute project path you found in issue descriptions, AGENTS.md, or other files. Those paths point to the main repo where other workers are active — editing files there causes merge conflicts and stepping on each other's work.
-
-**Rules:**
-- Use **relative paths** for all file operations. Your worktree has the full repo.
-- If you see a path like `/Users/.../project/src/foo.py` in an issue, access it as `src/foo.py` (relative).
-- NEVER run `cd /Users/.../project/` — you'll leave your worktree and corrupt other workers' state.
-- Run `pwd` if you're unsure where you are. Your worktree path contains `.octobots/workers/your-role/`.
-- Git operations (commit, push, branch) work normally — your worktree has its own branch.
-
 ## Session Lifecycle
 
 Read `octobots/shared/conventions/sessions.md` for the full protocol. Summary:

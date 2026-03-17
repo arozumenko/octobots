@@ -342,6 +342,7 @@ class Supervisor:
         self.taskbox = Taskbox(RUNTIME_DIR / "relay.db")
         self.launched: set[str] = set()
         self._running = True
+        self._worker_dirs: dict[str, str] = {}  # role → worktree path (empty if shared)
 
         # Scheduler
         self.job_store = JobStore(RUNTIME_DIR / "schedule.json")
@@ -463,6 +464,7 @@ class Supervisor:
 
         # Code workers cd into their isolated environment
         worker_dir = RUNTIME_DIR / "workers" / role
+        self._worker_dirs[role] = str(worker_dir) if worker_dir.is_dir() else ""
         if worker_dir.is_dir():
             self.tmux.send_keys(pane, f"cd '{worker_dir}'")
             time.sleep(1)
@@ -501,6 +503,17 @@ class Supervisor:
         # Build single-line task prompt
         notify_cmd = f"octobots/scripts/notify-user.sh"
         relay_cmd = f"python3 {RELAY_SCRIPT}"
+
+        # Inject worktree context for isolated workers
+        worktree_dir = self._worker_dirs.get(role, "")
+        worktree_rule = ""
+        if worktree_dir:
+            worktree_rule = (
+                f" WORKSPACE: You are in an isolated worktree at {worktree_dir}. "
+                f"Use RELATIVE paths only (e.g. src/foo.py, not /Users/.../project/src/foo.py). "
+                f"NEVER cd to absolute project paths — other workers are active there."
+            )
+
         prompt = (
             f"Message from {sender}: {content} "
             f"-- RULES: You MUST respond to this message. "
@@ -509,6 +522,7 @@ class Supervisor:
             f"3) run: {notify_cmd} \"Done: summary\". "
             f"If it is a question: answer via {relay_cmd} ack {msg_id} \"your answer\". "
             f"NEVER ignore a message. Silence breaks the pipeline."
+            f"{worktree_rule}"
         )
         self.tmux.send_keys(pane, prompt, confirm_paste=True)
         console.print(f"[green]→[/green] {role}: task from {sender} ({msg_id[:8]})")
