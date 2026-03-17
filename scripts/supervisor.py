@@ -499,6 +499,9 @@ class Supervisor:
         # Check for restart requests from workers
         self._poll_restart_requests()
 
+        # Monitor worker health (context pressure, API errors)
+        self._check_worker_health()
+
         # Poll taskbox
         for role in self.workers:
             msgs = self.taskbox.inbox(role, limit=1)
@@ -507,6 +510,77 @@ class Supervisor:
 
         # Poll GitHub for issues assigned to the bot
         self._poll_github_issues()
+
+    def _check_worker_health(self) -> None:
+        """Monitor worker panes for context pressure and auto-recover.
+
+        Detects:
+        - API 500 errors (context too large or transient failures)
+        - Long churn times (sign of retries / context pressure)
+        - Idle after error (worker gave up)
+
+        Actions:
+        - Send /compact on first signs of pressure
+        - Send /clear + restart if worker is stuck after multiple failures
+        """
+        now = time.time()
+        # Only check every 30 seconds
+        if now - getattr(self, "_last_health_check", 0) < 30:
+            return
+        self._last_health_check = now
+
+        if not hasattr(self, "_health_state"):
+            self._health_state: dict[str, dict] = {}
+
+        import re as _re
+
+        for role in self.workers:
+            pane = self.tmux.panes.get(role, "")
+            if not pane:
+                continue
+
+            output = self.tmux.capture_pane(pane, 15)
+            if not output:
+                continue
+
+            state = self._health_state.setdefault(role, {
+                "error_count": 0,
+                "last_compact": 0,
+                "last_restart": 0,
+            })
+
+            # Detect API errors
+            has_500 = "API Error: 500" in output or "Internal server error" in output
+            has_overloaded = "overloaded_error" in output
+            has_context_error = "prompt is too long" in output.lower() or "context window" in output.lower()
+
+            # Detect if worker is idle (at prompt) after errors
+            lines = output.strip().split("\n")
+            last_lines = [l.strip() for l in lines[-3:] if l.strip()]
+            is_idle = any(
+                "bypass permissions" in l.lower() or l.startswith("❯") or l.startswith(">")
+                for l in last_lines
+            )
+
+            if has_500 or has_overloaded or has_context_error:
+                state["error_count"] += 1
+
+                # First occurrence: try /compact
+                if state["error_count"] <= 2 and now - state["last_compact"] > 120:
+                    console.print(f"[yellow]⚠ {role}: API error detected, sending /compact[/yellow]")
+                    self.tmux.send_keys(pane, "/compact")
+                    state["last_compact"] = now
+
+                # Repeated errors + idle: worker is stuck, restart it
+                elif state["error_count"] >= 3 and is_idle and now - state["last_restart"] > 300:
+                    console.print(f"[red]⚠ {role}: stuck after {state['error_count']} errors, restarting[/red]")
+                    self.cmd_restart(role)
+                    state["last_restart"] = now
+                    state["error_count"] = 0
+            else:
+                # No errors visible — reset counter
+                if is_idle or "Cooked" in output or "Done" in output:
+                    state["error_count"] = 0
 
     def _poll_restart_requests(self) -> None:
         """Check for restart requests via taskbox (from workers or telegram)."""
