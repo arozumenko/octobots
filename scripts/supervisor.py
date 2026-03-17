@@ -156,6 +156,37 @@ class Taskbox:
         conn.close()
         return row[0] if row else 0
 
+    def undelivered_responses(self, limit: int = 10) -> list[dict]:
+        """Fetch ack responses that haven't been delivered back to the sender."""
+        conn = self._db()
+        rows = conn.execute(
+            "SELECT id, sender, recipient, content, response, updated_at FROM messages "
+            "WHERE status = 'done' AND response != '' AND response_delivered = 0 "
+            "ORDER BY updated_at ASC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+
+    def mark_response_delivered(self, msg_id: str) -> None:
+        conn = self._db()
+        conn.execute(
+            "UPDATE messages SET response_delivered = 1, updated_at = ? WHERE id = ?",
+            (time.time(), msg_id),
+        )
+        conn.commit()
+        conn.close()
+
+    def _ensure_schema(self) -> None:
+        """Add response_delivered column if it doesn't exist (migration)."""
+        conn = self._db()
+        try:
+            conn.execute("SELECT response_delivered FROM messages LIMIT 1")
+        except sqlite3.OperationalError:
+            conn.execute("ALTER TABLE messages ADD COLUMN response_delivered INTEGER DEFAULT 0")
+            conn.commit()
+        conn.close()
+
 
 # ── Tmux ────────────────────────────────────────────────────────────────────
 
@@ -377,6 +408,7 @@ class Supervisor:
     def setup(self) -> None:
         # Init taskbox
         self.taskbox.init()
+        self.taskbox._ensure_schema()
 
         # Get GitHub App token (used as fallback if no per-role tokens)
         self._gh_app_token = self._get_gh_app_token()
@@ -502,14 +534,44 @@ class Supervisor:
         # Monitor worker health (context pressure, API errors)
         self._check_worker_health()
 
-        # Poll taskbox
+        # Poll taskbox — deliver pending messages
         for role in self.workers:
             msgs = self.taskbox.inbox(role, limit=1)
             if msgs:
                 self.process_message(role, msgs[0])
 
+        # Deliver ack responses back to senders
+        self._deliver_responses()
+
         # Poll GitHub for issues assigned to the bot
         self._poll_github_issues()
+
+    def _deliver_responses(self) -> None:
+        """Deliver ack responses back to the original sender."""
+        try:
+            responses = self.taskbox.undelivered_responses(limit=5)
+        except Exception:
+            return  # schema migration may not have run yet
+
+        for resp in responses:
+            sender = resp["sender"]
+            recipient = resp["recipient"]
+            response_text = resp["response"]
+            msg_id = resp["id"]
+
+            # The sender is who should receive the response
+            pane = self.tmux.panes.get(sender, "")
+            if not pane:
+                # Sender not a running worker (e.g. "github", "telegram")
+                self.taskbox.mark_response_delivered(msg_id)
+                continue
+
+            prompt = (
+                f"Response from {recipient} to your earlier message: {response_text}"
+            )
+            self.tmux.send_keys(pane, prompt, confirm_paste=True)
+            self.taskbox.mark_response_delivered(msg_id)
+            console.print(f"[blue]←[/blue] {sender}: response from {recipient} ({msg_id[:8]})")
 
     def _check_worker_health(self) -> None:
         """Monitor worker panes for context pressure and auto-recover.
