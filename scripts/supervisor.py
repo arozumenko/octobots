@@ -184,7 +184,18 @@ class Taskbox:
             conn.execute("SELECT response_delivered FROM messages LIMIT 1")
         except sqlite3.OperationalError:
             conn.execute("ALTER TABLE messages ADD COLUMN response_delivered INTEGER DEFAULT 0")
+            # Mark all existing messages as delivered so we don't replay history
+            conn.execute("UPDATE messages SET response_delivered = 1 WHERE status = 'done'")
             conn.commit()
+        conn.close()
+
+    def mark_all_responses_delivered(self) -> None:
+        """Mark all current responses as delivered (used on startup to avoid replay)."""
+        conn = self._db()
+        conn.execute(
+            "UPDATE messages SET response_delivered = 1 WHERE status = 'done' AND response != '' AND response_delivered = 0"
+        )
+        conn.commit()
         conn.close()
 
 
@@ -410,6 +421,7 @@ class Supervisor:
         # Init taskbox
         self.taskbox.init()
         self.taskbox._ensure_schema()
+        self.taskbox.mark_all_responses_delivered()  # don't replay old responses
 
         # Get GitHub App token (used as fallback if no per-role tokens)
         self._gh_app_token = self._get_gh_app_token()
