@@ -150,6 +150,19 @@ class Taskbox:
         conn.close()
         return count
 
+    def requeue_processing(self, role: str) -> int:
+        """Move processing messages for a role back to pending so they get re-delivered."""
+        conn = self._db()
+        cur = conn.execute(
+            "UPDATE messages SET status='pending', updated_at=? "
+            "WHERE recipient=? AND status='processing'",
+            (time.time(), role),
+        )
+        conn.commit()
+        count = cur.rowcount
+        conn.close()
+        return count
+
     def pending_count(self) -> int:
         conn = self._db()
         row = conn.execute("SELECT COUNT(*) FROM messages WHERE status='pending'").fetchone()
@@ -655,6 +668,9 @@ class Supervisor:
                 # Repeated errors + idle: worker is stuck, restart it
                 elif state["error_count"] >= 3 and is_idle and now - state["last_restart"] > 300:
                     console.print(f"[red]⚠ {role}: stuck after {state['error_count']} errors, restarting[/red]")
+                    requeued = self.taskbox.requeue_processing(role)
+                    if requeued:
+                        console.print(f"[yellow]↩ {role}: requeued {requeued} interrupted task(s)[/yellow]")
                     self.cmd_restart(role)
                     state["last_restart"] = now
                     state["error_count"] = 0
@@ -861,6 +877,9 @@ class Supervisor:
         if not pane:
             console.print(f"[red]Unknown role: {role}[/red]")
             return
+        requeued = self.taskbox.requeue_processing(role)
+        if requeued:
+            console.print(f"[yellow]↩ {role}: requeued {requeued} interrupted task(s)[/yellow]")
         self.tmux.send_keys(pane, "/clear")
         console.print(f"[green]✓ {role} cleared[/green]")
 
