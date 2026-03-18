@@ -138,18 +138,6 @@ class Taskbox:
             result.setdefault(r["recipient"], {})[r["status"]] = r["count"]
         return result
 
-    def clear_stuck(self) -> int:
-        conn = self._db()
-        cur = conn.execute(
-            "UPDATE messages SET status='done', response='abandoned on restart', updated_at=? "
-            "WHERE status='processing'",
-            (time.time(),),
-        )
-        conn.commit()
-        count = cur.rowcount
-        conn.close()
-        return count
-
     def requeue_processing(self, role: str) -> int:
         """Move processing messages for a role back to pending so they get re-delivered."""
         conn = self._db()
@@ -157,6 +145,42 @@ class Taskbox:
             "UPDATE messages SET status='pending', updated_at=? "
             "WHERE recipient=? AND status='processing'",
             (time.time(), role),
+        )
+        conn.commit()
+        count = cur.rowcount
+        conn.close()
+        return count
+
+    def requeue_all_processing(self) -> int:
+        """Move all processing messages back to pending (used on startup)."""
+        conn = self._db()
+        cur = conn.execute(
+            "UPDATE messages SET status='pending', updated_at=? WHERE status='processing'",
+            (time.time(),),
+        )
+        conn.commit()
+        count = cur.rowcount
+        conn.close()
+        return count
+
+    def active_tasks(self) -> list[dict]:
+        """Return all pending and processing messages."""
+        conn = self._db()
+        rows = conn.execute(
+            "SELECT id, sender, recipient, status, content, created_at "
+            "FROM messages WHERE status IN ('pending', 'processing') "
+            "ORDER BY created_at ASC"
+        ).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+
+    def abandon_all(self) -> int:
+        """Mark all pending and processing messages as done (hard reset)."""
+        conn = self._db()
+        cur = conn.execute(
+            "UPDATE messages SET status='done', response='abandoned', updated_at=? "
+            "WHERE status IN ('pending', 'processing')",
+            (time.time(),),
         )
         conn.commit()
         count = cur.rowcount
@@ -462,10 +486,18 @@ class Supervisor:
         else:
             console.print("[dim]No GH tokens configured — using personal gh auth[/dim]")
 
-        # Clear stuck messages
-        stuck = self.taskbox.clear_stuck()
-        if stuck:
-            console.print(f"[yellow]Cleared {stuck} stuck message(s) → done[/yellow]")
+        # Requeue any interrupted tasks from previous run
+        requeued = self.taskbox.requeue_all_processing()
+        if requeued:
+            console.print(f"[yellow]↩ Requeued {requeued} interrupted task(s) → pending[/yellow]")
+
+        # Show active task summary before launching workers
+        active = self.taskbox.active_tasks()
+        if active:
+            console.print(f"[cyan]📋 {len(active)} task(s) queued for delivery:[/cyan]")
+            for t in active:
+                preview = t["content"].replace("\n", " ")[:70]
+                console.print(f"  [dim]{t['recipient']:15} ← {t['sender']:15} {preview}[/dim]")
 
         # Create tmux session
         self.tmux.create_session(self.workers)
@@ -872,6 +904,39 @@ class Supervisor:
         self._launch_worker(role)
         console.print(f"[green]✓ {role} restarted[/green]")
 
+    def cmd_tasks(self, args: list[str]) -> None:
+        sub = args[0] if args else "list"
+
+        if sub == "clean":
+            # Requeue all processing → pending
+            requeued = self.taskbox.requeue_all_processing()
+            console.print(f"[yellow]↩ Requeued {requeued} processing task(s) → pending[/yellow]")
+        elif sub == "abandon":
+            count = self.taskbox.abandon_all()
+            console.print(f"[yellow]🗑 Abandoned {count} task(s)[/yellow]")
+        else:
+            active = self.taskbox.active_tasks()
+            if not active:
+                console.print("[dim]No pending or processing tasks.[/dim]")
+                return
+            table = Table(title="Active Tasks", box=box.ROUNDED)
+            table.add_column("ID", style="dim", width=14)
+            table.add_column("Status", width=10)
+            table.add_column("From", width=18)
+            table.add_column("To", width=18)
+            table.add_column("Content")
+            for t in active:
+                status_color = "yellow" if t["status"] == "processing" else "green"
+                preview = t["content"].replace("\n", " ")[:60]
+                table.add_row(
+                    t["id"][:12],
+                    f"[{status_color}]{t['status']}[/{status_color}]",
+                    t["sender"],
+                    t["recipient"],
+                    preview,
+                )
+            console.print(table)
+
     def cmd_clear(self, role: str) -> None:
         pane = self.tmux.panes.get(role)
         if not pane:
@@ -1188,6 +1253,7 @@ class Supervisor:
             ("/send <role> <msg>", "Send a message to a worker's pane"),
             ("/restart <role|all>", "Restart a worker (exit + relaunch)"),
             ("/clear <role>", "Send /clear to a worker"),
+            ("/tasks [clean|abandon]", "List active tasks; clean requeues processing; abandon drops all"),
             ("/board", "Show team board"),
             ("/bridge", "Start Telegram bridge (background)"),
             ("/health", "System health check"),
@@ -1228,6 +1294,8 @@ class Supervisor:
                 console.print("[red]Usage: /send <role> <message>[/red]")
         elif cmd == "/restart":
             self.cmd_restart(args[0] if args else "all")
+        elif cmd == "/tasks":
+            self.cmd_tasks(args)
         elif cmd == "/clear":
             if args:
                 self.cmd_clear(args[0])
