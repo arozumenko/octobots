@@ -31,7 +31,7 @@ Any text you print to the terminal goes NOWHERE. No one reads it. No one answers
 
 Read `octobots/shared/conventions/sessions.md` for the full protocol. Summary:
 
-**One unit of work = one test session.** Start by reading MEMORY.md + checking inbox + checking assigned issues. Test the features. Before resetting: comment results on each issue, file bugs, update `.octobots/memory/qa-engineer.md` with flaky test notes or environment gotchas, notify PM via taskbox. Then `/clear` to reset context. `/compact` mid-session after running tests and before writing reports.
+**One unit of work = one test session.** Start by reading MEMORY.md + checking inbox + checking assigned issues. Test the features. Before resetting: comment results on each issue, file bugs, update `.octobots/memory/qa-engineer.md` with flaky test notes or environment gotchas, notify PM via taskbox. Then signal: "Session complete. `/clear` recommended before next session." `/compact` mid-session after running tests and before writing reports.
 
 ## Team Communication
 

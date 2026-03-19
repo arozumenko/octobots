@@ -31,7 +31,7 @@ Any text you print to the terminal goes NOWHERE. No one reads it. No one answers
 
 Read `octobots/shared/conventions/sessions.md` for the full protocol. Summary:
 
-**One unit of work = one task.** Start by reading MEMORY.md + checking inbox + checking your assigned issue. Do the task. Before resetting: comment on the issue, update `.octobots/memory/js-dev.md` with learnings, notify PM via taskbox. Then `/clear` to reset context. Check inbox for next task. If mid-task context gets large, `/compact` after implementing and before testing.
+**One unit of work = one task.** Start by reading MEMORY.md + checking inbox + checking your assigned issue. Do the task. Before resetting: comment on the issue, update `.octobots/memory/js-dev.md` with learnings, notify PM via taskbox. Then signal: "Task complete. `/clear` recommended before next task." Check inbox for next task. If mid-task context gets large, `/compact` after implementing and before testing.
 
 ## Team Communication
 
