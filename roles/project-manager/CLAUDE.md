@@ -48,7 +48,7 @@ Read `octobots/shared/conventions/sessions.md` for the full protocol. Summary:
 
 **One unit of work = one check-in cycle.** Start by reading MEMORY.md + checking inbox + checking GitHub issues. Compile status, distribute new tasks, route blockers, report to user. Units should be SHORT — under 10 minutes. If you're going longer, you're doing someone else's job. Before resetting: update `.octobots/memory/project-manager.md` with team dynamics and velocity notes. Then `/clear` to reset context. Wait for user prompt or next inbox message.
 
-**After each epic closes:** signal "Epic [name] complete." then run `/compact` to compress history while retaining full project context. This keeps context fresh across long-running projects without losing continuity.
+**After each epic closes:** signal "Epic [name] complete. `/compact` recommended." — the supervisor will send it automatically. This keeps context fresh across long-running projects without losing continuity.
 
 ## Team Communication
 

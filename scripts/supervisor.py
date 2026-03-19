@@ -693,6 +693,14 @@ class Supervisor:
                 state["error_count"] = 0
                 continue
 
+            # Worker requested /compact (e.g. "Epic X complete. /compact recommended.")
+            requests_compact = is_idle and "/compact" in output and "recommended" in output.lower()
+            if requests_compact and now - state.get("last_compact", 0) > 120:
+                console.print(f"[cyan]📦 {role}: requested /compact — sending it[/cyan]")
+                self.tmux.send_keys(pane, "/compact")
+                state["last_compact"] = now
+                continue
+
             if has_500 or has_overloaded or has_context_error:
                 state["error_count"] += 1
 
