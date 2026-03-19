@@ -519,8 +519,13 @@ class Supervisor:
             return
 
         worker_dir = RUNTIME_DIR / "workers" / role
-        launch_dir = worker_dir if worker_dir.is_dir() else PROJECT_DIR
-        console.print(f"[cyan]◆[/cyan] {role} → {launch_dir}")
+        # Roles with .workspace-root always launch from project root — they read
+        # the whole codebase (e.g. qa-engineer) and must not be confined to a
+        # subdirectory even when a workers/ folder exists for them.
+        uses_project_root = role_dir and (role_dir / ".workspace-root").is_file()
+        launch_dir = PROJECT_DIR if uses_project_root else (worker_dir if worker_dir.is_dir() else PROJECT_DIR)
+        env_label = "root" if uses_project_root else ("isolated" if worker_dir.is_dir() else "shared")
+        console.print(f"[cyan]◆[/cyan] {role} → {launch_dir} [{env_label}]")
 
         db_path = RUNTIME_DIR / "relay.db"
         gh_token = self._resolve_gh_token(role)
@@ -866,7 +871,12 @@ class Supervisor:
             role_dir = resolve_role(role)
             source = "project" if role_dir and str(LOCAL_ROLES) in str(role_dir) else "base"
             worker_dir = RUNTIME_DIR / "workers" / role
-            env = "isolated" if worker_dir.is_dir() else "shared"
+            if role_dir and (role_dir / ".workspace-root").is_file():
+                env = "root"
+            elif worker_dir.is_dir():
+                env = "isolated"
+            else:
+                env = "shared"
             table.add_row(role, pane, source, env)
 
         console.print(table)
