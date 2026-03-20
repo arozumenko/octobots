@@ -193,6 +193,20 @@ class Taskbox:
         conn.close()
         return row[0] if row else 0
 
+    def counts_for(self, role: str) -> dict[str, int]:
+        """Return pending and processing counts for a specific role."""
+        conn = self._db()
+        rows = conn.execute(
+            "SELECT status, COUNT(*) as n FROM messages "
+            "WHERE recipient = ? AND status IN ('pending', 'processing') GROUP BY status",
+            (role,),
+        ).fetchall()
+        conn.close()
+        result = {"pending": 0, "processing": 0}
+        for r in rows:
+            result[r["status"]] = r["n"]
+        return result
+
     def undelivered_responses(self, limit: int = 10) -> list[dict]:
         """Fetch ack responses that haven't been delivered back to the sender."""
         conn = self._db()
@@ -573,6 +587,15 @@ class Supervisor:
         self.tmux.send_keys(pane, prompt, confirm_paste=True)
         console.print(f"[green]→[/green] {role}: task from {sender} ({msg_id[:8]})")
 
+        # Auto-resume healthcheck — worker has real work now
+        if hasattr(self, "_health_state") and role in self._health_state:
+            state = self._health_state[role]
+            if state.get("healthcheck_paused"):
+                state["healthcheck_paused"] = False
+                state["nudge_count"] = 0
+                state["last_active_at"] = time.time()
+                console.print(f"[dim]▶ {role}: healthcheck resumed (new message delivered)[/dim]")
+
     def _on_scheduled_event(self, job: Any, result: str) -> None:
         """Called when a scheduled job executes."""
         type_label = job.type.value
@@ -669,6 +692,12 @@ class Supervisor:
                 "error_count": 0,
                 "last_compact": 0,
                 "last_restart": 0,
+                "last_clear": 0,
+                "last_pane_hash": "",
+                "last_active_at": now,
+                "nudge_count": 0,
+                "last_nudge_at": 0,
+                "healthcheck_paused": False,
             })
 
             # Detect API errors
@@ -723,6 +752,84 @@ class Supervisor:
                 # No errors visible — reset counter
                 if is_idle or "Cooked" in output or "Done" in output:
                     state["error_count"] = 0
+
+            # ── Silence / stuck detection ────────────────────────────────────
+            import hashlib as _hashlib
+            pane_hash = _hashlib.md5(output.encode()).hexdigest()
+            if pane_hash != state["last_pane_hash"]:
+                # Pane changed — worker is alive, reset silence tracking
+                state["last_pane_hash"] = pane_hash
+                state["last_active_at"] = now
+                state["nudge_count"] = 0
+                continue
+
+            silence_min = (now - state["last_active_at"]) / 60
+            if silence_min < 30:
+                continue  # Too early to worry
+
+            if state["healthcheck_paused"]:
+                continue  # User explicitly paused healthcheck for this role
+
+            counts = self.taskbox.counts_for(role)
+            board = self._board_assignments()
+            on_board = bool(board.get(role))
+
+            if counts["processing"] == 0 and not on_board:
+                # Genuinely idle — nothing in relay.db, nothing on board
+                if not state["healthcheck_paused"]:
+                    state["healthcheck_paused"] = True
+                    console.print(f"[dim]⏸ {role}: silent {silence_min:.0f}min, board empty — auto-paused healthcheck[/dim]")
+                continue
+
+            # Worker should be active but has been silent
+            if now - state["last_nudge_at"] < 900:  # 15 min between nudges
+                continue
+
+            state["nudge_count"] += 1
+            state["last_nudge_at"] = now
+
+            if counts["processing"] > 0:
+                requeued = self.taskbox.requeue_processing(role)
+                console.print(f"[yellow]🔔 {role}: silent {silence_min:.0f}min with {counts['processing']} stuck message(s) — requeued[/yellow]")
+            elif on_board:
+                console.print(f"[yellow]🔔 {role}: silent {silence_min:.0f}min, board has tasks but no relay messages[/yellow]")
+
+            if state["nudge_count"] >= 2:
+                # Second nudge — escalate to user
+                try:
+                    notify_cmd = PROJECT_DIR / "octobots/scripts/notify-user.sh"
+                    if notify_cmd.is_file():
+                        import subprocess as _sub
+                        _sub.Popen(
+                            ["bash", str(notify_cmd),
+                             f"⚠ {role} has been silent for {silence_min:.0f} minutes and may be stuck. Check /logs {role}"],
+                            cwd=str(PROJECT_DIR),
+                        )
+                except Exception:
+                    pass
+                console.print(f"[red]⚠ {role}: still silent after requeue — user notified[/red]")
+
+    def _board_assignments(self) -> dict[str, list[str]]:
+        """Parse .octobots/board.md Active Work table → {role: [task, ...]}."""
+        board_path = RUNTIME_DIR / "board.md"
+        if not board_path.is_file():
+            return {}
+        result: dict[str, list[str]] = {}
+        in_table = False
+        for line in board_path.read_text().splitlines():
+            if line.startswith("## Active Work"):
+                in_table = True
+                continue
+            if in_table and line.startswith("##"):
+                break
+            if in_table and "|" in line and not line.startswith("|---"):
+                cols = [c.strip() for c in line.split("|") if c.strip()]
+                if len(cols) >= 2 and cols[0] not in ("Role", "—", ""):
+                    role = cols[0].lower().replace(" ", "-")
+                    task = cols[1] if len(cols) > 1 else ""
+                    if task and task != "—":
+                        result.setdefault(role, []).append(task)
+        return result
 
     def _poll_restart_requests(self) -> None:
         """Check for restart requests via taskbox (from workers or telegram)."""
@@ -1258,6 +1365,22 @@ class Supervisor:
         else:
             console.print(f"[red]Unknown action: {action}. Use: cancel, pause, resume[/red]")
 
+    def cmd_pause(self, role: str) -> None:
+        if not hasattr(self, "_health_state"):
+            self._health_state = {}
+        state = self._health_state.setdefault(role, {})
+        state["healthcheck_paused"] = True
+        console.print(f"[yellow]⏸ {role}: healthcheck paused until next message[/yellow]")
+
+    def cmd_resume(self, role: str) -> None:
+        if not hasattr(self, "_health_state"):
+            self._health_state = {}
+        state = self._health_state.setdefault(role, {})
+        state["healthcheck_paused"] = False
+        state["nudge_count"] = 0
+        state["last_active_at"] = time.time()
+        console.print(f"[green]▶ {role}: healthcheck resumed[/green]")
+
     def cmd_help(self) -> None:
         table = Table(title="Commands", box=box.ROUNDED, show_header=False)
         table.add_column("Command", style="cyan")
@@ -1272,6 +1395,8 @@ class Supervisor:
             ("/restart <role|all>", "Restart a worker (exit + relaunch)"),
             ("/clear <role>", "Send /clear to a worker"),
             ("/tasks [clean|abandon]", "List active tasks; clean requeues processing; abandon drops all"),
+            ("/pause <role>", "Pause silence healthcheck (worker intentionally idle)"),
+            ("/resume <role>", "Resume silence healthcheck manually"),
             ("/board", "Show team board"),
             ("/bridge", "Start Telegram bridge (background)"),
             ("/health", "System health check"),
@@ -1319,6 +1444,16 @@ class Supervisor:
                 self.cmd_clear(args[0])
             else:
                 console.print("[red]Usage: /clear <role>[/red]")
+        elif cmd == "/pause":
+            if args:
+                self.cmd_pause(args[0])
+            else:
+                console.print("[red]Usage: /pause <role>[/red]")
+        elif cmd == "/resume":
+            if args:
+                self.cmd_resume(args[0])
+            else:
+                console.print("[red]Usage: /resume <role>[/red]")
         elif cmd == "/board":
             self.cmd_board()
         elif cmd == "/bridge":
