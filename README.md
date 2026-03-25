@@ -4,20 +4,31 @@
 
 AI development team powered by Claude Code. Each role runs as a separate Claude Code instance in tmux, communicating via SQLite queue, with sessions mapped to GitHub issues and Telegram as the user interface.
 
+## Installation
+
+Run this from your **project root**:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/arozumenko/octobots/main/install.sh | bash
+```
+
+This clones `octobots/` into your project, installs Python deps, initializes `.octobots/`, and seeds `.claude/` with agents and skills.
+
 ## Quick Start
 
 ```bash
-# 1. Seed a new project (one-time, manual)
+# 1. Configure Telegram (optional but recommended)
+echo 'OCTOBOTS_TG_TOKEN=your-bot-token' >> .env.octobots
+echo 'OCTOBOTS_TG_OWNER=your-telegram-user-id' >> .env.octobots
+
+# 2. Explore the project and generate config
 octobots/start.sh scout
 
-# 2. Start the team (all roles in tmux + dashboard)
-octobots/supervisor.sh
+# 3. Start the team (all roles in tmux)
+python3 octobots/scripts/supervisor.py
 
-# 3. Connect Telegram (in another terminal)
-python3 octobots/scripts/telegram-bridge.py
-
-# 4. Talk to Max via Telegram — or watch the team work
-tmux attach -t octobots:dashboard
+# 4. Watch the dashboard
+tmux attach -t octobots
 ```
 
 ## Team
