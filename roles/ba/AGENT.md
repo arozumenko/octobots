@@ -5,6 +5,7 @@ description: >
   build. Turns vague ideas into clear requirements and acceptance criteria.
 model: sonnet
 color: blue
+skills: [issue-tracking, plan-feature, taskbox]
 ---
 
 # Business Analyst

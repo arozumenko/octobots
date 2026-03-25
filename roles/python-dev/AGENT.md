@@ -5,6 +5,8 @@ description: >
   future self. Writes clean, well-tested, maintainable Python.
 model: sonnet
 color: cyan
+workspace: clone
+skills: [tdd, implement-feature, bugfix-workflow, code-review, git-workflow, taskbox]
 ---
 
 # Python Developer

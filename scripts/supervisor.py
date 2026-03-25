@@ -47,7 +47,7 @@ LOCAL_ROLES = RUNTIME_DIR / "roles"
 
 TMUX_SESSION = "octobots"
 EXCLUDED_ROLES = {"scout"}
-WORKTREE_ROLES = {"python-dev", "js-dev", "qa-engineer"}
+WORKTREE_ROLES = {"python-dev", "js-dev"}
 
 # Role theming — colors and display names for tmux panes
 ROLE_THEME: dict[str, dict[str, str]] = {
@@ -255,7 +255,8 @@ class Taskbox:
 class TmuxManager:
     def __init__(self, session: str = TMUX_SESSION):
         self.session = session
-        self.panes: dict[str, str] = {}  # role → pane target
+        self.panes: dict[str, str] = {}   # role → pane target
+        self._placeholder: str | None = None  # ghost pane keeping layout even
 
     def exists(self) -> bool:
         r = subprocess.run(["tmux", "has-session", "-t", self.session], capture_output=True)
@@ -350,6 +351,86 @@ class TmuxManager:
             "tmux", "set-option", "-t", self.session, "pane-active-border-style", "fg=colour75,bold",
         ], capture_output=True)
 
+        # Ensure even pane count from the start
+        self._sync_placeholder()
+
+    def _alloc_pane(self) -> str:
+        """Split a new pane, re-tile, return its target string."""
+        subprocess.run(
+            ["tmux", "split-window", "-t", f"{self.session}:dashboard", "-h"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["tmux", "select-layout", "-t", f"{self.session}:dashboard", "tiled"],
+            capture_output=True,
+        )
+        # Identify the new index — not yet tracked in self.panes or _placeholder
+        r = subprocess.run(
+            ["tmux", "list-panes", "-t", f"{self.session}:dashboard", "-F", "#{pane_index}"],
+            capture_output=True, text=True,
+        )
+        known = {p.split(".")[-1] for p in self.panes.values()}
+        if self._placeholder:
+            known.add(self._placeholder.split(".")[-1])
+        indices = [i.strip() for i in r.stdout.strip().splitlines() if i.strip()]
+        new_idx = next((i for i in indices if i not in known), indices[-1])
+        return f"{self.session}:dashboard.{new_idx}"
+
+    def _sync_placeholder(self) -> None:
+        """Keep pane count even: add a ghost pane when odd, remove it when even."""
+        needs = (len(self.panes) % 2 == 1)
+
+        if needs and self._placeholder is None:
+            pane_target = self._alloc_pane()
+            self._placeholder = pane_target
+            subprocess.run([
+                "tmux", "select-pane", "-t", pane_target,
+                "-T", "·",
+                "-P", "fg=colour237",
+            ], capture_output=True)
+
+        elif not needs and self._placeholder is not None:
+            subprocess.run(["tmux", "kill-pane", "-t", self._placeholder], capture_output=True)
+            self._placeholder = None
+            subprocess.run(
+                ["tmux", "select-layout", "-t", f"{self.session}:dashboard", "tiled"],
+                capture_output=True,
+            )
+
+    def add_pane(self, role: str) -> str:
+        """Add a role pane, keep layout even with placeholder logic."""
+        # Kill placeholder first so _alloc_pane finds the right new index
+        if self._placeholder:
+            subprocess.run(["tmux", "kill-pane", "-t", self._placeholder], capture_output=True)
+            self._placeholder = None
+
+        pane_target = self._alloc_pane()
+        self.panes[role] = pane_target
+
+        theme = ROLE_THEME.get(role, {"color": "colour250", "icon": "🤖", "name": role})
+        subprocess.run([
+            "tmux", "select-pane", "-t", pane_target,
+            "-T", f"{theme['icon']} {theme['name']}",
+            "-P", f"fg={theme['color']}",
+        ], capture_output=True)
+
+        self._sync_placeholder()
+        return pane_target
+
+    def kill_pane(self, pane: str) -> None:
+        """Kill a role pane, keep layout even with placeholder logic."""
+        # Kill placeholder first — it will be re-evaluated after
+        if self._placeholder:
+            subprocess.run(["tmux", "kill-pane", "-t", self._placeholder], capture_output=True)
+            self._placeholder = None
+
+        subprocess.run(["tmux", "kill-pane", "-t", pane], capture_output=True)
+        subprocess.run(
+            ["tmux", "select-layout", "-t", f"{self.session}:dashboard", "tiled"],
+            capture_output=True,
+        )
+        self._sync_placeholder()
+
     def save_pane_map(self) -> None:
         pane_map = RUNTIME_DIR / ".pane-map"
         pane_map.write_text(
@@ -403,6 +484,7 @@ class Supervisor:
         self.tmux = TmuxManager()
         self.taskbox = Taskbox(RUNTIME_DIR / "relay.db")
         self.launched: set[str] = set()
+        self._role_source: dict[str, str] = {}  # worker_id → source role (for clones)
         self._running = True
 
         # Scheduler
@@ -521,11 +603,14 @@ class Supervisor:
             self._launch_worker(role)
 
         self.tmux.save_pane_map()
+        self._write_roster()
 
     def _launch_worker(self, role: str) -> None:
-        role_dir = resolve_role(role)
+        # For clones, source_role is the definition; role is the instance id
+        source_role = self._role_source.get(role, role)
+        role_dir = resolve_role(source_role)
         if not role_dir:
-            console.print(f"[red]✗ {role}: AGENT.md not found[/red]")
+            console.print(f"[red]✗ {role}: AGENT.md not found (source: {source_role})[/red]")
             return
 
         pane = self.tmux.panes.get(role, "")
@@ -539,21 +624,21 @@ class Supervisor:
         uses_project_root = role_dir and (role_dir / ".workspace-root").is_file()
         launch_dir = PROJECT_DIR if uses_project_root else (worker_dir if worker_dir.is_dir() else PROJECT_DIR)
         env_label = "root" if uses_project_root else ("isolated" if worker_dir.is_dir() else "shared")
-        console.print(f"[cyan]◆[/cyan] {role} → {launch_dir} [{env_label}]")
+        label = f"{role} [{source_role}]" if source_role != role else role
+        console.print(f"[cyan]◆[/cyan] {label} → {launch_dir} [{env_label}]")
 
         db_path = RUNTIME_DIR / "relay.db"
-        gh_token = self._resolve_gh_token(role)
+        gh_token = self._resolve_gh_token(source_role)
         gh_env = f"GH_TOKEN={gh_token} " if gh_token else ""
         # NOTE: Do NOT pass OCTOBOTS_TG_TOKEN/OCTOBOTS_TG_OWNER here.
         # Shell scripts (notify-user.sh, send-file.sh) read .env.octobots
         # fresh on every invocation, so edits take effect immediately
         # without restarting workers.
 
-        # Register role as a named agent: symlink role_dir into .claude/agents/<role>
-        # so `claude --agent <role>` can discover AGENT.md and show the name in the prompt.
+        # Register source role as a named agent in the launch dir
         agents_dir = launch_dir / ".claude" / "agents"
         agents_dir.mkdir(parents=True, exist_ok=True)
-        agent_link = agents_dir / role
+        agent_link = agents_dir / source_role
         if agent_link.is_symlink() and agent_link.resolve() != role_dir.resolve():
             agent_link.unlink()
         if not agent_link.exists():
@@ -573,13 +658,400 @@ class Supervisor:
         claude_cmd = (
             f"{gh_env}OCTOBOTS_ID={role} OCTOBOTS_DB={db_path} "
             f"CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1 "
-            f"claude --agent '{role}' --dangerously-skip-permissions"
+            f"claude --agent '{source_role}' --dangerously-skip-permissions"
         )
         # cd + launch in one atomic command so Claude starts from launch_dir.
         cmd = f"cd '{launch_dir}' && {claude_cmd}"
         self.tmux.send_keys(pane, cmd, confirm_paste=True)
         self.launched.add(role)
         time.sleep(3)
+
+    # ── Board ────────────────────────────────────────────────────────────────
+
+    def _update_board_section(self, section: str, content: str) -> None:
+        """Replace a named ## section in board.md, preserving all other sections."""
+        import re as _re
+        board_path = RUNTIME_DIR / "board.md"
+        if not board_path.is_file():
+            return
+        text = board_path.read_text()
+        pattern = rf'(## {_re.escape(section)}\n).*?(?=\n## |\Z)'
+        replacement = rf'\g<1>{content}'
+        new_text = _re.sub(pattern, replacement, text, flags=_re.DOTALL)
+        if new_text == text and f'## {section}' not in text:
+            new_text = text.rstrip() + f'\n\n## {section}\n\n{content}'
+        board_path.write_text(new_text)
+
+    def _write_roster(self) -> None:
+        """Update the Team section of board.md with current worker roster."""
+        import re as _re
+
+        lines = [
+            "_Supervisor-maintained. Route taskbox messages to the Worker ID, not the role name._\n\n",
+            "| Worker ID | Role | Workspace | Skills |\n",
+            "|-----------|------|-----------|--------|\n",
+        ]
+
+        for worker in self.workers:
+            source = self._role_source.get(worker, worker)
+            role_dir = resolve_role(source)
+
+            worker_dir = RUNTIME_DIR / "workers" / worker
+            if role_dir and (role_dir / ".workspace-root").is_file():
+                workspace = "root"
+            elif worker_dir.is_dir():
+                agent_md_text = (role_dir / "AGENT.md").read_text() if role_dir else ""
+                workspace = "clone" if _re.search(r'^workspace:\s*clone', agent_md_text, _re.MULTILINE) else "isolated"
+            else:
+                workspace = "shared"
+
+            allowed = self._role_skills(source)
+            skills_str = ", ".join(sorted(allowed)) if allowed else "all"
+            role_label = f"{source} *(clone)*" if source != worker else source
+            lines.append(f"| `{worker}` | {role_label} | {workspace} | {skills_str} |\n")
+
+        self._update_board_section("Team", "".join(lines))
+
+    def _write_active_work(self) -> None:
+        """Update the Active Work section of board.md from live taskbox state."""
+        active = self.taskbox.active_tasks()
+        if not active:
+            content = "_No active tasks._\n"
+        else:
+            rows = [
+                "| Worker | Task | Status |\n",
+                "|--------|------|--------|\n",
+            ]
+            for t in active:
+                preview = t["content"].replace("\n", " ")[:70]
+                status_icon = "⚙" if t["status"] == "processing" else "⏳"
+                rows.append(f"| `{t['recipient']}` | {preview} | {status_icon} {t['status']} |\n")
+            content = "".join(rows)
+        self._update_board_section("Active Work", content)
+
+    # ── Role management ──────────────────────────────────────────────────────
+
+    def _role_skills(self, role: str) -> set[str] | None:
+        """Return declared skills from AGENT.md frontmatter, or None (no filter)."""
+        import re
+        role_dir = resolve_role(role)
+        if not role_dir:
+            return None
+        agent_md = role_dir / "AGENT.md"
+        if not agent_md.is_file():
+            return None
+        m = re.search(r'^skills:\s*\[([^\]]*)\]', agent_md.read_text(), re.MULTILINE)
+        if not m:
+            return None
+        return {s.strip() for s in m.group(1).split(",") if s.strip()}
+
+    def _setup_worker_env(self, role: str, source_role: str | None = None) -> None:
+        """Create .octobots/workers/<role>/ with symlinks, env, .claude/ seeding.
+
+        source_role: the role definition to use (defaults to role). Used for clones
+                     where the worker id differs from the role definition name.
+        """
+        source = source_role or role
+        worker_dir = RUNTIME_DIR / "workers" / role
+        if worker_dir.is_dir():
+            return  # already set up
+
+        worker_dir.mkdir(parents=True)
+
+        # Standard symlinks into the project
+        for src, name in [
+            (PROJECT_DIR / "octobots", "octobots"),
+            (RUNTIME_DIR, ".octobots"),
+        ]:
+            link = worker_dir / name
+            if src.exists() and not link.exists():
+                link.symlink_to(src)
+
+        for fname in ["AGENTS.md", ".env", ".env.octobots"]:
+            src = PROJECT_DIR / fname
+            link = worker_dir / fname
+            if src.is_file() and not link.exists():
+                link.symlink_to(src)
+
+        for dname in ["venv", "node_modules"]:
+            src = PROJECT_DIR / dname
+            link = worker_dir / dname
+            if src.is_dir() and not link.exists():
+                link.symlink_to(src)
+
+        # Worker env file
+        db_path = RUNTIME_DIR / "relay.db"
+        (worker_dir / ".env.worker").write_text(
+            f"WORKER_ID={role}\nOCTOBOTS_ID={role}\nOCTOBOTS_DB={db_path}\n"
+        )
+
+        # Seed .claude/agents/ — link source role definition, not worker id
+        agents_dir = worker_dir / ".claude" / "agents"
+        skills_dir = worker_dir / ".claude" / "skills"
+        agents_dir.mkdir(parents=True, exist_ok=True)
+        skills_dir.mkdir(parents=True, exist_ok=True)
+
+        role_dir = resolve_role(source)
+        if role_dir:
+            link = agents_dir / source  # always link under the source role name
+            if not link.exists():
+                link.symlink_to(role_dir)
+
+        shared_agents = OCTOBOTS_DIR / "shared" / "agents"
+        if shared_agents.is_dir():
+            for agent_dir in shared_agents.iterdir():
+                if agent_dir.is_dir():
+                    link = agents_dir / agent_dir.name
+                    if not link.exists():
+                        link.symlink_to(agent_dir)
+
+        allowed = self._role_skills(source)
+        skills_base = OCTOBOTS_DIR / "skills"
+        if skills_base.is_dir():
+            for skill_dir in skills_base.iterdir():
+                if skill_dir.is_dir():
+                    if allowed is not None and skill_dir.name not in allowed:
+                        continue
+                    link = skills_dir / skill_dir.name
+                    if not link.exists():
+                        link.symlink_to(skill_dir)
+
+        # Memory file — clones get their own memory, seeded from source if exists
+        memory_file = RUNTIME_DIR / "memory" / f"{role}.md"
+        if not memory_file.is_file():
+            source_memory = RUNTIME_DIR / "memory" / f"{source}.md"
+            if source_role and source_memory.is_file():
+                # Clone inherits source memory as starting point
+                import shutil as _sh
+                _sh.copy2(source_memory, memory_file)
+            else:
+                memory_file.write_text(
+                    f"# Memory — {role}\n\nPersistent learnings from past conversations. "
+                    "Read this before starting work.\n\n"
+                    "## Project Knowledge\n\n## Lessons Learned\n\n## Notes\n"
+                )
+
+    def _clone_repos_for_worker(self, worker_dir: Path) -> int:
+        """Clone all project git repos into the worker dir. Returns count cloned."""
+        cloned = 0
+        for git_dir in PROJECT_DIR.glob("*/.git"):
+            repo_path = git_dir.parent
+            repo_name = repo_path.name
+            if repo_name == "octobots":
+                continue
+            dest = worker_dir / repo_name
+            if dest.exists():
+                continue
+            try:
+                origin = subprocess.run(
+                    ["git", "-C", str(repo_path), "remote", "get-url", "origin"],
+                    capture_output=True, text=True, check=True,
+                ).stdout.strip()
+                subprocess.run(
+                    ["git", "clone", "--quiet", origin, str(dest)],
+                    capture_output=True, check=True,
+                )
+                cloned += 1
+            except subprocess.CalledProcessError:
+                console.print(f"[yellow]  ✗ could not clone {repo_name}[/yellow]")
+        return cloned
+
+    def _role_clone(self, source_role: str, alias: str | None = None) -> None:
+        """Spawn a clone of source_role with its own isolated workspace."""
+        if resolve_role(source_role) is None:
+            console.print(f"[red]Unknown role: {source_role}[/red]")
+            return
+
+        # Auto-generate alias if not provided
+        if alias is None:
+            n = 2
+            while f"{source_role}-{n}" in self.workers:
+                n += 1
+            alias = f"{source_role}-{n}"
+
+        if alias in self.workers:
+            console.print(f"[yellow]{alias} is already running.[/yellow]")
+            return
+
+        # Record source mapping before setup
+        self._role_source[alias] = source_role
+
+        self._setup_worker_env(alias, source_role=source_role)
+
+        # Clone repos if workspace: clone is declared on the source role
+        import re as _re
+        role_dir = resolve_role(source_role)
+        agent_md = (role_dir / "AGENT.md").read_text() if role_dir else ""
+        if _re.search(r'^workspace:\s*clone', agent_md, _re.MULTILINE):
+            worker_dir = RUNTIME_DIR / "workers" / alias
+            cloned = self._clone_repos_for_worker(worker_dir)
+            if cloned:
+                console.print(f"[dim]  Cloned {cloned} repo(s) into {alias} workspace[/dim]")
+
+        pane = self.tmux.add_pane(alias)
+        self.workers.append(alias)
+        self.tmux.save_pane_map()
+        self._write_roster()
+        self._launch_worker(alias)
+        console.print(f"[green]✓ {alias} (clone of {source_role}) launched[/green]")
+
+    def _teardown_worker_env(self, role: str) -> None:
+        """Remove worker dir and undo promotion if the role was promoted from Claude."""
+        worker_dir = RUNTIME_DIR / "workers" / role
+        promoted = (worker_dir / ".promoted").is_file() if worker_dir.is_dir() else False
+
+        # Remove worker dir
+        if worker_dir.is_dir():
+            shutil.rmtree(worker_dir)
+
+        # If promoted: restore role dir back to .claude/agents/<role>/
+        role_dir = BASE_ROLES / role
+        agent_link = PROJECT_DIR / ".claude" / "agents" / role
+        if promoted and role_dir.is_dir():
+            if agent_link.is_symlink():
+                agent_link.unlink()
+            shutil.move(str(role_dir), str(agent_link))
+            console.print(f"[dim]  Restored {role} → .claude/agents/{role}/[/dim]")
+
+    def _role_add(self, role: str) -> None:
+        if role in self.workers:
+            console.print(f"[yellow]{role} is already running.[/yellow]")
+            return
+
+        # Resolve source: octobots/roles/ or .claude/agents/ (real dir = Claude-created)
+        role_dir = resolve_role(role)
+        promoted = False
+
+        if role_dir is None:
+            agent_candidate = PROJECT_DIR / ".claude" / "agents" / role
+            if agent_candidate.is_dir() and not agent_candidate.is_symlink():
+                # Promote: move into octobots/roles/, replace with symlink
+                dest = BASE_ROLES / role
+                shutil.move(str(agent_candidate), str(dest))
+                agent_candidate.symlink_to(dest)
+                role_dir = dest
+                promoted = True
+                console.print(f"[cyan]↑ Promoted .claude/agents/{role}/ → octobots/roles/{role}/[/cyan]")
+            else:
+                console.print(f"[red]Role '{role}' not found in octobots/roles/ or .claude/agents/[/red]")
+                return
+
+        # Warn if AGENT.md is missing octobots conventions
+        agent_md = role_dir / "AGENT.md"
+        if agent_md.is_file():
+            content = agent_md.read_text()
+            missing = []
+            if "taskbox" not in content:
+                missing.append("taskbox")
+            if "Task complete." not in content and "Session complete." not in content:
+                missing.append("session signal")
+            if missing:
+                console.print(f"[yellow]⚠  {role}/AGENT.md missing octobots conventions: {', '.join(missing)}[/yellow]")
+                console.print(f"[dim]   Worker will run but may not integrate cleanly with the team.[/dim]")
+
+        # Set up worker environment
+        self._setup_worker_env(role)
+
+        # Mark as promoted so teardown can undo it
+        if promoted:
+            (RUNTIME_DIR / "workers" / role / ".promoted").touch()
+
+        # Add live tmux pane
+        pane = self.tmux.add_pane(role)
+        self.workers.append(role)
+        self.tmux.save_pane_map()
+        self._write_roster()
+
+        # Launch
+        self._launch_worker(role)
+        console.print(f"[green]✓ {role} added and launched[/green]")
+
+    def _role_remove(self, role: str) -> None:
+        if role not in self.workers:
+            console.print(f"[red]{role} is not an active worker.[/red]")
+            return
+
+        pane = self.tmux.panes.get(role)
+
+        # Graceful exit
+        if pane:
+            self.tmux.send_keys(pane, "/exit")
+            time.sleep(2)
+            self.tmux.kill_pane(pane)
+            del self.tmux.panes[role]
+
+        self.workers.remove(role)
+        self.launched.discard(role)
+        self._role_source.pop(role, None)
+        self.tmux.save_pane_map()
+        self._write_roster()
+
+        # Tear down workspace
+        self._teardown_worker_env(role)
+        console.print(f"[green]✓ {role} removed[/green]")
+
+    def cmd_role(self, args: list[str]) -> None:
+        sub = args[0] if args else "list"
+
+        if sub == "list":
+            table = Table(title="Roles", box=box.ROUNDED)
+            table.add_column("Role", style="cyan")
+            table.add_column("Source")
+            table.add_column("Active", justify="center")
+
+            seen: set[str] = set()
+            rows: list[tuple[str, str, bool]] = []
+
+            # octobots/roles/
+            for d in sorted(BASE_ROLES.iterdir()) if BASE_ROLES.is_dir() else []:
+                if d.is_dir() and (d / "AGENT.md").is_file():
+                    rows.append((d.name, "octobots/roles/", d.name in self.workers))
+                    seen.add(d.name)
+
+            # .octobots/roles/ (local overrides)
+            for d in sorted(LOCAL_ROLES.iterdir()) if LOCAL_ROLES.is_dir() else []:
+                if d.is_dir() and (d / "AGENT.md").is_file() and d.name not in seen:
+                    rows.append((d.name, ".octobots/roles/", d.name in self.workers))
+                    seen.add(d.name)
+
+            # .claude/agents/ — real dirs (Claude-created, not yet promoted)
+            agents_dir = PROJECT_DIR / ".claude" / "agents"
+            if agents_dir.is_dir():
+                for d in sorted(agents_dir.iterdir()):
+                    if d.is_dir() and not d.is_symlink() and d.name not in seen:
+                        rows.append((d.name, ".claude/agents/ (promotable)", d.name in self.workers))
+                        seen.add(d.name)
+
+            for name, source, active in rows:
+                clone_of = self._role_source.get(name)
+                display = f"{name} [dim](clone of {clone_of})[/dim]" if clone_of else name
+                table.add_row(
+                    display,
+                    source,
+                    "[green]●[/green]" if active else "[dim]○[/dim]",
+                )
+            console.print(table)
+
+        elif sub == "add":
+            if len(args) < 2:
+                console.print("[red]Usage: /role add <name>[/red]")
+                return
+            self._role_add(args[1])
+
+        elif sub == "remove":
+            if len(args) < 2:
+                console.print("[red]Usage: /role remove <name>[/red]")
+                return
+            self._role_remove(args[1])
+
+        elif sub == "clone":
+            if len(args) < 2:
+                console.print("[red]Usage: /role clone <source> [alias][/red]")
+                return
+            self._role_clone(args[1], args[2] if len(args) > 2 else None)
+
+        else:
+            console.print(f"[red]Unknown subcommand: {sub}[/red]. Usage: /role [list|add|remove|clone]")
 
     def process_message(self, role: str, msg: dict) -> None:
         pane = self.tmux.panes.get(role, "")
@@ -639,8 +1111,11 @@ class Supervisor:
         # Monitor worker health (context pressure, API errors)
         self._check_worker_health()
 
-        # Poll taskbox — deliver pending messages
+        # Poll taskbox — deliver pending messages, but only if worker is free
         for role in self.workers:
+            counts = self.taskbox.counts_for(role)
+            if counts["processing"] > 0:
+                continue  # worker is busy — hold until current task is acked
             msgs = self.taskbox.inbox(role, limit=1)
             if msgs:
                 self.process_message(role, msgs[0])
@@ -650,6 +1125,9 @@ class Supervisor:
 
         # Poll GitHub for issues assigned to the bot
         self._poll_github_issues()
+
+        # Keep board Active Work section current
+        self._write_active_work()
 
     def _deliver_responses(self) -> None:
         """Deliver ack responses back to the original sender."""
@@ -1055,6 +1533,58 @@ class Supervisor:
         self._launch_worker(role)
         console.print(f"[green]✓ {role} restarted[/green]")
 
+    def cmd_skill(self, role: str, skill: str) -> None:
+        """Add a skill to a worker: creates the symlink + updates AGENT.md skills list."""
+        skill_src = OCTOBOTS_DIR / "skills" / skill
+        if not skill_src.is_dir():
+            available = [d.name for d in (OCTOBOTS_DIR / "skills").iterdir() if d.is_dir()]
+            console.print(f"[red]Unknown skill: {skill}[/red]")
+            console.print(f"[dim]Available: {', '.join(sorted(available))}[/dim]")
+            return
+
+        if role not in self.workers and role != "all":
+            console.print(f"[red]Unknown role: {role}[/red]")
+            return
+
+        roles = list(self.workers) if role == "all" else [role]
+
+        for r in roles:
+            # 1. Symlink into worker's .claude/skills/
+            skills_dir = RUNTIME_DIR / "workers" / r / ".claude" / "skills"
+            skills_dir.mkdir(parents=True, exist_ok=True)
+            link = skills_dir / skill
+            if link.exists() or link.is_symlink():
+                console.print(f"[dim]{r}: {skill} already linked[/dim]")
+            else:
+                link.symlink_to(skill_src)
+                console.print(f"[green]✓ {r}: linked .claude/skills/{skill}[/green]")
+
+            # 2. Update skills: list in AGENT.md frontmatter
+            for base in (BASE_ROLES, LOCAL_ROLES):
+                agent_md = base / r / "AGENT.md"
+                if not agent_md.is_file():
+                    continue
+                text = agent_md.read_text()
+                import re
+                m = re.search(r'^skills:\s*\[([^\]]*)\]', text, re.MULTILINE)
+                if m:
+                    current = [s.strip() for s in m.group(1).split(",") if s.strip()]
+                    if skill not in current:
+                        current.append(skill)
+                        new_line = f"skills: [{', '.join(current)}]"
+                        text = text[:m.start()] + new_line + text[m.end():]
+                        agent_md.write_text(text)
+                        console.print(f"[dim]  Updated {agent_md.relative_to(OCTOBOTS_DIR.parent)} skills list[/dim]")
+                else:
+                    # Insert skills: line before closing ---
+                    text = re.sub(r'^(---\s*\n)', r'skills: [' + skill + r']\n\1',
+                                  text[::-1], count=1, flags=re.MULTILINE)[::-1]
+                    agent_md.write_text(text)
+                    console.print(f"[dim]  Added skills: [{skill}] to {agent_md.relative_to(OCTOBOTS_DIR.parent)}[/dim]")
+                break
+
+        console.print(f"[yellow]Note: restart the worker(s) to load the new skill.[/yellow]")
+
     def cmd_tasks(self, args: list[str]) -> None:
         sub = args[0] if args else "list"
 
@@ -1419,6 +1949,11 @@ class Supervisor:
             ("/logs <role> [N]", "Last N lines from a worker"),
             ("/send <role> <msg>", "Send a message to a worker's pane"),
             ("/restart <role|all>", "Restart a worker (exit + relaunch)"),
+            ("/skill <role|all> <skill>", "Add a skill to a worker (symlink + update AGENT.md)"),
+            ("/role list", "Show all available roles and which are active"),
+            ("/role add <name>", "Add role live (promotes .claude/agents/ if needed)"),
+            ("/role remove <name>", "Stop role, remove workspace, demote if promoted"),
+            ("/role clone <source> [alias]", "Spawn a clone with its own isolated workspace"),
             ("/clear <role>", "Send /clear to a worker"),
             ("/tasks [clean|abandon]", "List active tasks; clean requeues processing; abandon drops all"),
             ("/pause <role>", "Pause silence healthcheck (worker intentionally idle)"),
@@ -1463,6 +1998,13 @@ class Supervisor:
                 console.print("[red]Usage: /send <role> <message>[/red]")
         elif cmd == "/restart":
             self.cmd_restart(args[0] if args else "all")
+        elif cmd == "/skill":
+            if len(args) >= 2:
+                self.cmd_skill(args[0], args[1])
+            else:
+                console.print("[red]Usage: /skill <role|all> <skill>[/red]")
+        elif cmd == "/role":
+            self.cmd_role(args)
         elif cmd == "/tasks":
             self.cmd_tasks(args)
         elif cmd == "/clear":

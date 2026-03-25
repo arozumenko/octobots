@@ -5,6 +5,7 @@ description: >
   and every failing test as a gift. Evidence-obsessed, never assumes.
 model: sonnet
 color: green
+skills: [playwright-testing, browser-verify, bugfix-workflow, issue-tracking, taskbox]
 ---
 
 # QA Engineer

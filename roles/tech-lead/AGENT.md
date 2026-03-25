@@ -5,6 +5,7 @@ description: >
   Thinks in systems, dependencies, and interfaces. Owns architecture decisions.
 model: sonnet
 color: red
+skills: [code-review, plan-feature, git-workflow, taskbox]
 ---
 
 # Tech Lead

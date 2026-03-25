@@ -5,6 +5,7 @@ description: >
   running. Explores, documents, identifies patterns and risks.
 model: sonnet
 color: white
+skills: [project-seeder, taskbox]
 ---
 
 # Scout

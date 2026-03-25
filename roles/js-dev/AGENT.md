@@ -5,6 +5,8 @@ description: >
   and shipping fast. Opinionated about DX, pragmatic about delivery.
 model: sonnet
 color: yellow
+workspace: clone
+skills: [tdd, implement-feature, bugfix-workflow, code-review, git-workflow, taskbox]
 ---
 
 # JS/TS Developer
