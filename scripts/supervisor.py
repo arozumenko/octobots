@@ -656,16 +656,42 @@ class Supervisor:
         if not agent_link.exists():
             agent_link.symlink_to(role_dir)
 
-        # Symlink project CLAUDE.md into isolated worker dirs so Claude auto-loads
-        # project context even when the worker runs from a worktree, not project root.
+        # Inject CLAUDE.md into isolated worker dirs so Claude auto-loads context.
+        # workspace:clone workers get a generated file with their exact workspace path —
+        # a symlink would give every worker the same file with no path info.
+        # Other isolated workers still get a symlink to the project CLAUDE.md.
         if launch_dir != PROJECT_DIR:
-            project_claude = PROJECT_DIR / "CLAUDE.md"
+            import re as _re
+            agent_md_text = (role_dir / "AGENT.md").read_text() if role_dir else ""
+            is_clone_workspace = bool(_re.search(r'^workspace:\s*clone', agent_md_text, _re.MULTILINE))
             worker_claude = launch_dir / "CLAUDE.md"
-            if project_claude.is_file():
-                if worker_claude.is_symlink() and worker_claude.resolve() != project_claude.resolve():
+
+            if is_clone_workspace:
+                # Remove stale symlink if present; regenerate real file each launch
+                # so the path stays accurate if worker_dir moves.
+                if worker_claude.is_symlink():
                     worker_claude.unlink()
-                if not worker_claude.exists():
-                    worker_claude.symlink_to(project_claude)
+                cloned_repos = [p.name for p in launch_dir.iterdir() if (p / ".git").is_dir()]
+                repo_lines = "\n".join(f"- `{launch_dir / r}/`" for r in sorted(cloned_repos))
+                project_claude = PROJECT_DIR / "CLAUDE.md"
+                project_content = project_claude.read_text() if project_claude.is_file() else ""
+                worker_claude.write_text(
+                    f"# YOUR WORKSPACE — CRITICAL\n\n"
+                    f"You are running from an isolated workspace, NOT the project root.\n\n"
+                    f"**Your workspace root:** `{launch_dir}/`\n\n"
+                    f"**Your cloned repos:**\n{repo_lines or '(none yet — check worker dir)'}\n\n"
+                    f"All file paths, git commands, and tool calls must use these paths.\n"
+                    f"Do NOT assume you are at `{PROJECT_DIR}/`.\n\n"
+                    f"---\n\n"
+                    + project_content
+                )
+            else:
+                project_claude = PROJECT_DIR / "CLAUDE.md"
+                if project_claude.is_file():
+                    if worker_claude.is_symlink() and worker_claude.resolve() != project_claude.resolve():
+                        worker_claude.unlink()
+                    if not worker_claude.exists():
+                        worker_claude.symlink_to(project_claude)
 
         claude_cmd = (
             f"{gh_env}OCTOBOTS_ID={role} OCTOBOTS_DB={db_path} "
