@@ -1240,9 +1240,10 @@ class Supervisor:
 
             # Worker requested /clear (e.g. "Task complete. /clear recommended before next task.")
             # Also detect legacy "Standing by." — worker done but using old signal pattern
+            output_lower = output.lower()
             requests_clear = is_idle and (
-                ("/clear" in output and "recommended" in output.lower())
-                or "standing by" in output.lower()
+                "/clear recommended" in output_lower
+                or "standing by" in output_lower
             )
             if requests_clear and now - state.get("last_clear", 0) > 60:
                 console.print(f"[cyan]🧹 {role}: requested /clear — sending it[/cyan]")
@@ -1252,7 +1253,7 @@ class Supervisor:
                 continue
 
             # Worker requested /compact (e.g. "Epic X complete. /compact recommended.")
-            requests_compact = is_idle and "/compact" in output and "recommended" in output.lower()
+            requests_compact = is_idle and "/compact recommended" in output_lower
             if requests_compact and now - state.get("last_compact", 0) > 120:
                 console.print(f"[cyan]📦 {role}: requested /compact — sending it[/cyan]")
                 self.tmux.send_keys(pane, "/compact")
