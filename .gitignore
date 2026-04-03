@@ -13,13 +13,13 @@
 .claude/projects/
 .claude/session-env/
 .claude/sessions/
-.claude/settings.json
 .claude/settings.local.json
 .claude/shell-snapshots/
 .claude/stats-cache.json
 .claude/tasks/
 .claude/telemetry/
 .claude/todos/
+.claude/skills/  # symlinks to shared skills
 
 # Per-role .claude/ runtime (generated per role)
 roles/*/.claude/.claude.json
@@ -85,7 +85,8 @@ Thumbs.db
 *.swp
 *.swo
 *~
-
+.elitea
+.playwright-mcp/
 # ── What IS tracked ─────────────────────────────────────────────────────────
 # roles/*/SOUL.md        — personality (versioned)
 # roles/*/CLAUDE.md      — instructions (versioned)

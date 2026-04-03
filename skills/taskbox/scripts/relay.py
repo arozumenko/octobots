@@ -143,6 +143,19 @@ def cmd_stats(_args: argparse.Namespace) -> None:
     print(json.dumps(stats, indent=2))
 
 
+def cmd_reset(args: argparse.Namespace) -> None:
+    conn = _db()
+    cur = conn.execute(
+        "UPDATE messages SET status = 'pending', updated_at = ? "
+        "WHERE recipient = ? AND status = 'processing'",
+        (time.time(), args.id),
+    )
+    conn.commit()
+    count = cur.rowcount
+    conn.close()
+    print(json.dumps({"reset": count, "worker": args.id}))
+
+
 def cmd_peers(_args: argparse.Namespace) -> None:
     conn = _db()
     rows = conn.execute(
@@ -188,6 +201,10 @@ def main() -> None:
 
     s = sub.add_parser("stats", help="Queue statistics")
     s.set_defaults(func=cmd_stats)
+
+    s = sub.add_parser("reset", help="Reset processing messages back to pending (use in Stop hook)")
+    s.add_argument("--id", required=True, help="Your instance ID")
+    s.set_defaults(func=cmd_reset)
 
     s = sub.add_parser("peers", help="List known peers")
     s.set_defaults(func=cmd_peers)

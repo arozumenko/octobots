@@ -1272,6 +1272,9 @@ class Supervisor:
                 or "standing by" in output_lower
             )
             if requests_clear and now - state.get("last_clear", 0) > 60:
+                requeued = self.taskbox.requeue_processing(role)
+                if requeued:
+                    console.print(f"[yellow]↩ {role}: requeued {requeued} processing task(s) before /clear[/yellow]")
                 console.print(f"[cyan]🧹 {role}: requested /clear — sending it[/cyan]")
                 self.tmux.send_keys(pane, "/clear")
                 state["last_clear"] = now
@@ -1323,10 +1326,12 @@ class Supervisor:
             if silence_min < 30:
                 continue  # Too early to worry
 
-            if state["healthcheck_paused"]:
+            counts = self.taskbox.counts_for(role)
+
+            # A stuck processing task always overrides the pause
+            if state["healthcheck_paused"] and counts["processing"] == 0:
                 continue  # User explicitly paused healthcheck for this role
 
-            counts = self.taskbox.counts_for(role)
             board = self._board_assignments()
             on_board = bool(board.get(role))
 

@@ -4,15 +4,17 @@
 
 ```
 pending ──→ processing ──→ done
-   │                        │
-   │  claim (atomic)        │  ack (response attached)
-   │                        │
-   └── queued in inbox      └── visible via `responses`
+   ↑              │               │
+   │  reset       │  claim        │  ack (response attached)
+   │  (Stop hook) │  (atomic)     │
+   └──────────────┘               └── visible via `responses`
 ```
 
 - **pending** — waiting in recipient's inbox
 - **processing** — claimed by one consumer, work in progress
 - **done** — acknowledged, response available to sender
+
+If a worker crashes or resets mid-task (e.g. `/clear`, compaction), its `processing` message is automatically returned to `pending` by the Stop hook.
 
 ## CLI Commands
 
@@ -26,6 +28,7 @@ All commands output JSON. The script is at `scripts/relay.py` relative to this s
 | `claim --id ID MSG_ID` | Atomically lock a message for processing |
 | `ack MSG_ID ["response"]` | Mark done, attach optional response |
 | `responses --id ID [--limit N]` | Check responses to messages you sent |
+| `reset --id ID` | Return this worker's `processing` messages to `pending` (used by Stop hook) |
 | `stats` | Queue counts grouped by recipient and status |
 | `peers` | List all known instance IDs |
 

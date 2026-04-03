@@ -1,0 +1,28 @@
+{
+  "skipDangerousModePermissionPrompt": true,
+  "model": "sonnet",
+  "hooks": {
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'test -n \"$OCTOBOTS_ID\" && python3 octobots/skills/taskbox/scripts/relay.py reset --id \"$OCTOBOTS_ID\" || true'"
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'test -n \"$OCTOBOTS_ID\" && python3 octobots/skills/taskbox/scripts/relay.py inbox --id \"$OCTOBOTS_ID\" || true'"
+          }
+        ]
+      }
+    ]
+  }
+}
