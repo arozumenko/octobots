@@ -105,11 +105,25 @@ seed_claude_dir() {
     mkdir -p "$target_dir/.claude/agents" "$target_dir/.claude/skills"
 
     # Roles → .claude/agents/<role>  (all, or only the worker's own role)
-    for role_dir in "$OCTOBOTS_DIR/roles"/*/; do
-        local role; role="$(basename "$role_dir")"
-        [[ -n "$only_role" && "$role" != "$only_role" ]] && continue
-        local link="$target_dir/.claude/agents/$role"
-        [[ ! -e "$link" ]] && ln -sf "$role_dir" "$link" && echo "  .claude/agents/$role"
+    # Source: installed agents in PROJECT_DIR/.claude/agents/ (canonical),
+    # then bundled fallback in octobots/roles/ (for any not yet installed).
+    declare -A _seeded_roles
+    for src_dir in "$PROJECT_DIR/.claude/agents" "$OCTOBOTS_DIR/roles"; do
+        [[ -d "$src_dir" ]] || continue
+        # Skip if src == target agents dir (would create self-symlinks)
+        [[ "$src_dir" == "$target_dir/.claude/agents" ]] && continue
+        for role_dir in "$src_dir"/*/; do
+            [[ -f "$role_dir/AGENT.md" ]] || continue
+            local role; role="$(basename "$role_dir")"
+            [[ -n "${_seeded_roles[$role]:-}" ]] && continue
+            [[ -n "$only_role" && "$role" != "$only_role" ]] && continue
+            local link="$target_dir/.claude/agents/$role"
+            if [[ ! -e "$link" ]]; then
+                ln -sf "$role_dir" "$link"
+                echo "  .claude/agents/$role"
+            fi
+            _seeded_roles[$role]=1
+        done
     done
 
     # Shared agents → .claude/agents/<name>  (always available to all workers)
@@ -124,7 +138,8 @@ seed_claude_dir() {
     # Skills — all skills for main project dir; role-filtered for workers
     local allowed_skills=()
     if [[ -n "$only_role" ]]; then
-        local agent_md="$OCTOBOTS_DIR/roles/$only_role/AGENT.md"
+        local agent_md="$PROJECT_DIR/.claude/agents/$only_role/AGENT.md"
+        [[ -f "$agent_md" ]] || agent_md="$OCTOBOTS_DIR/roles/$only_role/AGENT.md"
         if [[ -f "$agent_md" ]]; then
             # Parse: skills: [foo, bar, baz]  (single-line YAML array in frontmatter)
             local skills_line; skills_line=$(grep -m1 '^skills:' "$agent_md" 2>/dev/null || true)
