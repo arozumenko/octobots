@@ -5,7 +5,9 @@
 # Safe to run multiple times — only creates missing files, never overwrites.
 #
 # Usage:
-#   octobots/scripts/init-project.sh
+#   octobots/scripts/init-project.sh                          # standard init
+#   octobots/scripts/init-project.sh --update                 # re-fetch all from octobots.yaml
+#   octobots/scripts/init-project.sh --role <owner/repo[@ref]> # add one role ad-hoc
 
 set -euo pipefail
 
@@ -14,6 +16,19 @@ OCTOBOTS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 PROJECT_DIR="$(pwd)"
 RUNTIME="$PROJECT_DIR/.octobots"
 
+# ── Argument parsing ──────────────────────────────────────────────────────────
+UPDATE=0
+ADHOC_ROLE=""
+ADHOC_SKILL=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --update)         UPDATE=1; shift ;;
+        --role)           ADHOC_ROLE="${2:?--role requires owner/repo}"; shift 2 ;;
+        --skill)          ADHOC_SKILL="${2:?--skill requires owner/repo}"; shift 2 ;;
+        *)                shift ;;
+    esac
+done
+
 echo "Initializing .octobots/ in $PROJECT_DIR"
 
 # ── Create directory structure ──────────────────────────────────────────────
@@ -21,6 +36,7 @@ mkdir -p "$RUNTIME/memory"
 mkdir -p "$RUNTIME/roles"
 mkdir -p "$RUNTIME/skills"
 mkdir -p "$RUNTIME/agents"
+mkdir -p "$RUNTIME/registry"
 
 # ── Create board.md (team whiteboard) ───────────────────────────────────────
 if [[ ! -f "$RUNTIME/board.md" ]]; then
@@ -87,6 +103,89 @@ fi
 export OCTOBOTS_DB="$RUNTIME/relay.db"
 python3 "$OCTOBOTS_DIR/skills/taskbox/scripts/relay.py" init > /dev/null 2>&1 || true
 echo "  Taskbox DB: $RUNTIME/relay.db"
+
+# ── Fetch from octobots.yaml (project composition file) ──────────────────────
+# Parses octobots.yaml and prints "roles|skills <TAB> owner/repo <TAB> ref" lines.
+_parse_octobots_yaml() {
+    local yaml="$PROJECT_DIR/octobots.yaml"
+    [[ -f "$yaml" ]] || return 0
+    python3 - "$yaml" << 'PYEOF'
+import sys, re
+
+yaml_path = sys.argv[1]
+text = open(yaml_path).read()
+
+section = None
+item = {}
+
+for line in text.splitlines():
+    stripped = line.strip()
+    if not stripped or stripped.startswith('#'):
+        continue
+    if re.match(r'^roles:\s*$', stripped):
+        section = 'roles'; item = {}; continue
+    if re.match(r'^skills:\s*$', stripped):
+        section = 'skills'; item = {}; continue
+    if re.match(r'^version:', stripped) or re.match(r'^[a-z]', stripped) and ':' in stripped and not stripped.startswith('-'):
+        section = None; continue
+    if section and stripped.startswith('- repo:'):
+        if item.get('repo'):
+            print(f"{section}\t{item['repo']}\t{item.get('ref', 'main')}")
+        item = {'repo': stripped[7:].strip().strip('"').strip("'")}
+    elif section and re.match(r'^ref:', stripped) and item:
+        item['ref'] = stripped[4:].strip().strip('"').strip("'")
+
+if section and item.get('repo'):
+    print(f"{section}\t{item['repo']}\t{item.get('ref', 'main')}")
+PYEOF
+}
+
+_fetch_component() {
+    local section="$1" repo="$2" ref="$3"
+    local type; type=$([[ "$section" == "roles" ]] && echo "agent" || echo "skill")
+    local name="${repo##*/}"
+    name="${name%-agent}"; name="${name#skill-}"
+
+    # Check already installed (skip unless --update)
+    if [[ $UPDATE -eq 0 ]]; then
+        local check_dir
+        [[ "$section" == "roles" ]] && check_dir="$PROJECT_DIR/.claude/agents" || check_dir="$PROJECT_DIR/.claude/skills"
+        if [[ -d "$check_dir/$name" ]]; then
+            echo "  ✓ $name (already installed)"
+            return 0
+        fi
+    fi
+
+    echo "  Fetching $section: $repo@$ref"
+    bash "$SCRIPT_DIR/registry-fetch.sh" "$type" "$repo" "$ref" \
+        || echo "  ⚠  Failed to fetch $repo"
+}
+
+OCTOBOTS_YAML="$PROJECT_DIR/octobots.yaml"
+if [[ -f "$OCTOBOTS_YAML" ]]; then
+    echo ""
+    echo "Reading octobots.yaml..."
+    while IFS=$'\t' read -r section repo ref; do
+        [[ -z "$repo" ]] && continue
+        _fetch_component "$section" "$repo" "$ref"
+    done < <(_parse_octobots_yaml)
+fi
+
+# Ad-hoc fetch via --role / --skill flags
+if [[ -n "$ADHOC_ROLE" ]]; then
+    repo="${ADHOC_ROLE%%@*}"; ref="${ADHOC_ROLE#*@}"
+    [[ "$ref" == "$repo" ]] && ref="main"
+    echo ""; echo "Fetching role: $repo@$ref"
+    bash "$SCRIPT_DIR/registry-fetch.sh" agent "$repo" "$ref" \
+        || echo "  ⚠  Failed to fetch $repo"
+fi
+if [[ -n "$ADHOC_SKILL" ]]; then
+    repo="${ADHOC_SKILL%%@*}"; ref="${ADHOC_SKILL#*@}"
+    [[ "$ref" == "$repo" ]] && ref="main"
+    echo ""; echo "Fetching skill: $repo@$ref"
+    bash "$SCRIPT_DIR/registry-fetch.sh" skill "$repo" "$ref" \
+        || echo "  ⚠  Failed to fetch $repo"
+fi
 
 # ── Seed .claude/ for Claude Code agent + skill discovery ───────────────────
 # .claude/agents/ and .claude/skills/ are symlinks into octobots — source of

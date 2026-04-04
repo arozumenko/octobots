@@ -965,6 +965,18 @@ class Supervisor:
             console.print(f"[dim]  Restored {role} → .claude/agents/{role}/[/dim]")
 
     def _role_add(self, role: str) -> None:
+        # Detect GitHub repo format: owner/repo or owner/repo@ref
+        if "/" in role:
+            ref = "main"
+            repo = role
+            if "@" in repo:
+                repo, ref = repo.rsplit("@", 1)
+            console.print(f"[dim]Fetching role {repo}@{ref}...[/dim]")
+            installed_name = self._fetch_component("agent", repo, ref)
+            if not installed_name:
+                return
+            role = installed_name
+
         if role in self.workers:
             console.print(f"[yellow]{role} is already running.[/yellow]")
             return
@@ -1590,13 +1602,88 @@ class Supervisor:
         self._launch_worker(role)
         console.print(f"[green]✓ {role} restarted[/green]")
 
+    def _fetch_component(self, component_type: str, repo: str, ref: str = "main") -> str | None:
+        """Fetch a role or skill from GitHub via registry-fetch.sh.
+
+        Returns the installed name on success, None on failure.
+        component_type: 'agent' or 'skill'
+        repo: 'owner/repo'
+        ref: branch/tag/SHA
+        """
+        fetch_script = OCTOBOTS_DIR / "scripts" / "registry-fetch.sh"
+        if not fetch_script.is_file():
+            console.print(f"[red]registry-fetch.sh not found at {fetch_script}[/red]")
+            return None
+        try:
+            r = subprocess.run(
+                ["bash", str(fetch_script), component_type, repo, ref],
+                capture_output=True, text=True, cwd=str(PROJECT_DIR),
+            )
+            if r.returncode != 0:
+                console.print(f"[red]Fetch failed: {r.stderr.strip() or repo}[/red]")
+                return None
+            # Last non-empty line of stdout is the installed name
+            name = next((l.strip() for l in reversed(r.stdout.splitlines()) if l.strip()), None)
+            if r.stderr.strip():
+                for line in r.stderr.strip().splitlines():
+                    console.print(f"[dim]{line}[/dim]")
+            return name
+        except Exception as e:
+            console.print(f"[red]Fetch error: {e}[/red]")
+            return None
+
+    def cmd_skill_add(self, repo: str) -> None:
+        """Fetch a skill from GitHub and symlink into all active workers.
+
+        repo: 'owner/repo' or 'owner/repo@ref'
+        """
+        ref = "main"
+        if "@" in repo:
+            repo, ref = repo.rsplit("@", 1)
+
+        console.print(f"[dim]Fetching skill {repo}@{ref}...[/dim]")
+        skill_name = self._fetch_component("skill", repo, ref)
+        if not skill_name:
+            return
+
+        # Run setup-skill.sh to install dependencies
+        setup_script = OCTOBOTS_DIR / "scripts" / "setup-skill.sh"
+        if setup_script.is_file():
+            subprocess.run(["bash", str(setup_script), skill_name],
+                           capture_output=True, cwd=str(PROJECT_DIR))
+
+        # Symlink into all active workers' .claude/skills/
+        skill_src = PROJECT_DIR / ".claude" / "skills" / skill_name
+        if not skill_src.exists():
+            console.print(f"[yellow]⚠  Skill installed but .claude/skills/{skill_name} not found[/yellow]")
+            return
+
+        for worker in self.workers:
+            worker_skills = RUNTIME_DIR / "workers" / worker / ".claude" / "skills"
+            worker_skills.mkdir(parents=True, exist_ok=True)
+            link = worker_skills / skill_name
+            if link.exists() or link.is_symlink():
+                console.print(f"[dim]{worker}: {skill_name} already linked[/dim]")
+            else:
+                link.symlink_to(skill_src)
+                console.print(f"[green]✓ {worker}: linked .claude/skills/{skill_name}[/green]")
+
+        console.print(f"[green]✓ {skill_name} installed from {repo}[/green]")
+
     def cmd_skill(self, role: str, skill: str) -> None:
         """Add a skill to a worker: creates the symlink + updates AGENT.md skills list."""
+        # Resolve skill source: bundled skills first, then installed (.claude/skills/)
         skill_src = OCTOBOTS_DIR / "skills" / skill
         if not skill_src.is_dir():
-            available = [d.name for d in (OCTOBOTS_DIR / "skills").iterdir() if d.is_dir()]
+            skill_src = PROJECT_DIR / ".claude" / "skills" / skill
+        if not skill_src.is_dir():
+            bundled = [d.name for d in (OCTOBOTS_DIR / "skills").iterdir() if d.is_dir()]
+            installed = [d.name for d in (PROJECT_DIR / ".claude" / "skills").iterdir()
+                         if d.is_dir()] if (PROJECT_DIR / ".claude" / "skills").is_dir() else []
             console.print(f"[red]Unknown skill: {skill}[/red]")
-            console.print(f"[dim]Available: {', '.join(sorted(available))}[/dim]")
+            console.print(f"[dim]Bundled: {', '.join(sorted(bundled))}[/dim]")
+            if installed:
+                console.print(f"[dim]Installed: {', '.join(sorted(installed))}[/dim]")
             return
 
         if role not in self.workers and role != "all":
@@ -2012,9 +2099,10 @@ class Supervisor:
             ("/logs <role> [N]", "Last N lines from a worker"),
             ("/send <role> <msg>", "Send a message to a worker's pane"),
             ("/restart <role|all>", "Restart a worker (exit + relaunch)"),
-            ("/skill <role|all> <skill>", "Add a skill to a worker (symlink + update AGENT.md)"),
+            ("/skill add <owner/repo[@ref]>", "Fetch skill from GitHub + link into all workers"),
+            ("/skill <role|all> <skill>", "Link installed skill to a worker (update AGENT.md)"),
             ("/role list", "Show all available roles and which are active"),
-            ("/role add <name>", "Add role live (promotes .claude/agents/ if needed)"),
+            ("/role add <name|owner/repo[@ref]>", "Add role live; fetches from GitHub if repo given"),
             ("/role remove <name>", "Stop role, remove workspace, demote if promoted"),
             ("/role clone <source> [alias]", "Spawn a clone with its own isolated workspace"),
             ("/clear <role>", "Send /clear to a worker"),
@@ -2062,10 +2150,15 @@ class Supervisor:
         elif cmd == "/restart":
             self.cmd_restart(args[0] if args else "all")
         elif cmd == "/skill":
-            if len(args) >= 2:
+            if args and args[0] == "add":
+                if len(args) >= 2:
+                    self.cmd_skill_add(args[1])
+                else:
+                    console.print("[red]Usage: /skill add <owner/repo[@ref]>[/red]")
+            elif len(args) >= 2:
                 self.cmd_skill(args[0], args[1])
             else:
-                console.print("[red]Usage: /skill <role|all> <skill>[/red]")
+                console.print("[red]Usage: /skill add <owner/repo[@ref]>  |  /skill <role|all> <skill>[/red]")
         elif cmd == "/role":
             self.cmd_role(args)
         elif cmd == "/tasks":
