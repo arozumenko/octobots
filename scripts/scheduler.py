@@ -12,7 +12,7 @@ import re
 import subprocess
 import time
 import uuid
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, replace as dataclasses_replace
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
@@ -318,8 +318,38 @@ class Scheduler:
 
         return results
 
+    def _interpolate(self, content: str, job: ScheduledJob) -> str:
+        """Resolve {variable} placeholders in scheduled prompt content at execution time.
+
+        Variables:
+            {time}     — 24h local time, e.g. "14:35"
+            {date}     — ISO 8601 date, e.g. "2026-04-04"
+            {datetime} — local date + time, e.g. "2026-04-04 14:35"
+            {weekday}  — full weekday name, e.g. "Friday"
+            {week}     — ISO week number, e.g. "14"
+            {month}    — full month name, e.g. "April"
+            {role}     — target role receiving the prompt
+            {schedule} — the job's spec (interval or cron expression)
+
+        Unknown {placeholders} are left unchanged.
+        """
+        now = datetime.now()
+        return (
+            content
+            .replace("{time}",     now.strftime("%H:%M"))
+            .replace("{date}",     now.strftime("%Y-%m-%d"))
+            .replace("{datetime}", now.strftime("%Y-%m-%d %H:%M"))
+            .replace("{weekday}",  now.strftime("%A"))
+            .replace("{week}",     now.strftime("%W"))
+            .replace("{month}",    now.strftime("%B"))
+            .replace("{role}",     job.target)
+            .replace("{schedule}", job.spec)
+        )
+
     def _execute(self, job: ScheduledJob) -> str:
         """Execute a single job. Returns a result string."""
+        # Resolve template variables in content before dispatch
+        job = dataclasses_replace(job, content=self._interpolate(job.content, job))
         try:
             if job.action == JobAction.SEND:
                 return self._exec_send(job)

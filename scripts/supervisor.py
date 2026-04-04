@@ -1847,7 +1847,13 @@ class Supervisor:
             "  /schedule cron 0 9 * * MON-FRI @ba Daily standup report\n\n"
             "  /loop 30m @pm Check task progress\n"
             "  /loop 5m run ./scripts/health-check.sh\n"
-            "  /loop 10m agent rca-investigator Check for flaky tests[/dim]"
+            "  /loop 10m agent rca-investigator Check for flaky tests\n\n"
+            "Template variables (resolved at execution time):\n"
+            "  {time}     current time (14:35)   {date}     today's date (2026-04-04)\n"
+            "  {datetime} date + time             {weekday}  day name (Friday)\n"
+            "  {week}     ISO week number         {month}    month name (April)\n"
+            "  {role}     target role name        {schedule} job spec (every 30m)\n"
+            "  Unknown {variables} are passed through unchanged.[/dim]"
         )
 
     def cmd_schedule(self, args: list[str]) -> None:
