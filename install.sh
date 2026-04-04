@@ -98,6 +98,70 @@ else
     echo "  ⚠  pip not found — run: pip install -r octobots/scripts/requirements.txt"
 fi
 
+# ── Install published skills via npx skills add ───────────────────────────────
+
+echo ""
+echo "Installing skills..."
+if command -v npx &>/dev/null; then
+    PUBLISHED_SKILLS=(
+        "arozumenko/browser-verify"
+        "arozumenko/skill-tdd"
+        "arozumenko/skill-code-review"
+        "arozumenko/skill-git-workflow"
+        "arozumenko/skill-issue-tracking"
+        "arozumenko/skill-playwright-testing"
+    )
+    for skill_repo in "${PUBLISHED_SKILLS[@]}"; do
+        repo_name="${skill_repo##*/}"
+        skill_name="${repo_name#skill-}"
+        if [[ -d ".claude/skills/$skill_name" ]]; then
+            echo "  ✓ $skill_name (already installed)"
+        else
+            if npx skills add "$skill_repo" --yes 2>/dev/null; then
+                echo "  ✓ $skill_name"
+            else
+                echo "  ⚠  $skill_name — install failed, will use bundled fallback"
+            fi
+        fi
+    done
+else
+    echo "  ⚠  npx not found — skipping skill install (Node.js required)"
+    echo "     Install manually: npx skills add arozumenko/skill-tdd  (etc.)"
+fi
+
+# ── Select and install agents ─────────────────────────────────────────────────
+
+echo ""
+echo "Setting up your team..."
+if command -v npx &>/dev/null; then
+    # Run interactive agent selector (prompts on /dev/tty, repos printed to stdout)
+    SELECTED_REPOS=$(python3 "$DEST/scripts/select-agents.py" </dev/tty) || {
+        echo "  ⚠  Agent selection failed — installing scout + pm + python-dev as defaults"
+        SELECTED_REPOS="arozumenko/scout-agent
+arozumenko/pm-agent
+arozumenko/python-dev-agent"
+    }
+
+    while IFS= read -r agent_repo; do
+        [[ -z "$agent_repo" ]] && continue
+        repo_name="${agent_repo##*/}"
+        if npx "github:$agent_repo" init --all 2>/dev/null; then
+            echo "  ✓ $repo_name"
+        else
+            echo "  ⚠  $repo_name — install failed"
+        fi
+    done <<< "$SELECTED_REPOS"
+else
+    echo "  ⚠  npx not found — skipping agent install (Node.js required)"
+    echo "     Install manually: npx github:arozumenko/scout-agent init  (etc.)"
+fi
+
+# ── Process setup.yaml for bundled skills (MCP + other deps) ─────────────────
+
+echo ""
+echo "Configuring skill dependencies..."
+DEST="$DEST" python3 "$DEST/scripts/apply-skill-deps.py"
+
 # ── Initialize runtime ────────────────────────────────────────────────────────
 
 echo ""

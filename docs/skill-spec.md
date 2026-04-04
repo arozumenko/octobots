@@ -1,34 +1,38 @@
 # Octobots Skill Specification
 
-Based on the [agentskills.io](https://agentskills.io) open standard. Skills work across Claude Code, Copilot, Cursor, and 35+ other agent products.
+Based on the [agentskills.io](https://agentskills.io) open standard. Skills work across Claude Code, Copilot, Cursor, and 35+ other agent products. Installable via `npx skills add <owner/repo>` from [skills.sh](https://skills.sh).
 
 ## File Structure
 
 ```
 skill-name/
-├── SKILL.md              # Required — metadata + instructions
+├── SKILL.md              # Required — metadata + instructions (agentskills.io spec)
+├── setup.yaml            # Optional — octobots install config (MCP, permissions)
 ├── scripts/              # Optional — executable code (Python, Bash, JS)
 ├── references/           # Optional — detailed docs, loaded on demand
 └── assets/               # Optional — templates, data files
 ```
 
-Only `SKILL.md` is required. Everything else is progressive disclosure — loaded when the agent needs it, not at startup.
+Only `SKILL.md` is required. `setup.yaml` is an octobots extension — other agent clients ignore it. Everything else is progressive disclosure — loaded when the agent needs it, not at startup.
 
 ## SKILL.md Format
 
+SKILL.md frontmatter follows the agentskills.io spec exactly. No extra fields.
+
 ```yaml
 ---
-name: my-skill                    # Required. 1-64 chars, lowercase + hyphens only
-                                  # Must match directory name
-description: >-                   # Required. 1-1024 chars
-  What this skill does and when   # Include trigger phrases for discovery
-  to activate it. Use when the    # Write in third person
+name: my-skill                    # Required. 1-64 chars, lowercase + hyphens only.
+                                  # Must match directory name.
+description: >-                   # Required. 1-1024 chars.
+  What this skill does and when   # Include trigger phrases for discovery.
+  to activate it. Use when the    # Write in third person.
   user asks to "do X" or "fix Y".
-license: Apache-2.0               # Optional
-compatibility: Requires Python 3  # Optional. Max 500 chars
-metadata:                          # Optional key-value pairs
+license: Apache-2.0               # Optional.
+compatibility: Requires Python 3  # Optional. Max 500 chars. Plain string only.
+metadata:                         # Optional. Flat key-value pairs only.
   author: octobots
   version: "1.0.0"
+allowed-tools: Bash Read          # Optional/experimental. Space-delimited tool list.
 ---
 
 # Skill Title
@@ -40,6 +44,66 @@ when the skill activates, so keep it focused (<500 lines).
 
 Steps, commands, decision trees. Reference files in `references/`
 or `scripts/` for details — the agent reads them on demand (Tier 3).
+```
+
+## setup.yaml Format (Octobots Extension)
+
+`setup.yaml` declares installation-time config read by `setup-skill.sh`. Other agent clients ignore this file. Place it alongside `SKILL.md` in the skill directory.
+
+```yaml
+# octobots-specific install config — ignored by non-octobots clients
+dependencies:
+  mcp:                            # MCP servers to merge into .mcp.json
+    - name: my-server             # Key name in mcpServers{}
+      command: npx                # Command to launch the server
+      args: ["@scope/package"]    # Args array
+      env: {}                     # Optional env vars
+
+permissions:                      # Informational — shown to user before install
+  filesystem: read-write          # read | read-write
+  network: true                   # true | false
+  shell: true                     # true | false
+```
+
+Rules:
+- All fields are optional — a skill with no MCP deps needs no `setup.yaml` at all
+- `mcp` entries map directly to `.mcp.json` `mcpServers` format
+- `setup-skill.sh` merges MCP entries on install; existing entries with the same `name` are never overwritten (user config wins)
+- `permissions` is informational only — displayed before install, not enforced at runtime
+
+## Python Script Dependencies (PEP 723)
+
+Declare Python dependencies inline in script files, not in frontmatter. This is the standard cross-client approach:
+
+```python
+# /// script
+# dependencies = [
+#   "httpx>=0.27.0",
+#   "azure-identity>=1.15.0",
+# ]
+# ///
+
+import httpx
+# ... rest of script
+```
+
+`setup-skill.sh` detects PEP 723 blocks and runs `pip install` automatically. Scripts with PEP 723 blocks are self-contained — any tool can install and run them.
+
+## npm / Node Dependencies
+
+Use `npx` or `bunx` at runtime — no pre-declaration needed:
+
+```bash
+npx @playwright/mcp@latest
+bunx some-tool
+```
+
+If a global install is required, declare it in `setup.yaml` under a `npm` key (octobots-only):
+
+```yaml
+dependencies:
+  npm:
+    - "@some/cli-tool"
 ```
 
 ## Naming Rules
@@ -70,22 +134,30 @@ The description is always in memory. Keep it specific enough for accurate activa
    - Low: exact scripts (for fragile operations like DB migrations)
 3. **Keep SKILL.md under 500 lines** — split details into `references/`
 4. **Assume the agent is smart** — don't over-explain basic concepts
-5. **Use `scripts/` for executable code** — self-contained, document dependencies
+5. **Use `scripts/` for executable code** — declare Python deps via PEP 723
 6. **Use forward slashes** in file paths (never backslashes)
 
 ## Installation
 
-Skills are discovered from these locations:
+Skills are discovered from these locations (in precedence order):
 
 ```
-~/.claude/skills/skill-name/SKILL.md          # Personal (all projects)
-.claude/skills/skill-name/SKILL.md            # Project (this repo only)
+.agents/skills/skill-name/        # Cross-client standard (all agents)
+.claude/skills/skill-name/        # Claude Code specific
+~/.agents/skills/skill-name/      # User-level, cross-client
+~/.claude/skills/skill-name/      # User-level, Claude Code
 ```
 
 Symlinks work — keep source in `octobots/skills/`, symlink into `.claude/skills/`:
 
 ```bash
 ln -s /path/to/octobots/skills/my-skill .claude/skills/my-skill
+```
+
+Install from registry:
+
+```bash
+npx skills add arozumenko/skill-msgraph
 ```
 
 ## Validation Checklist
@@ -95,9 +167,12 @@ ln -s /path/to/octobots/skills/my-skill .claude/skills/my-skill
 - [ ] `name` is lowercase, hyphens only, 1-64 chars
 - [ ] `description` is 1-1024 chars with trigger phrases
 - [ ] SKILL.md body is under 500 lines
-- [ ] Scripts use stdlib or document dependencies in `compatibility`
+- [ ] No `dependencies` or `permissions` blocks in SKILL.md frontmatter — those go in `setup.yaml`
+- [ ] Python script deps declared via PEP 723 `# /// script` blocks, not in frontmatter
+- [ ] `setup.yaml` present if skill requires MCP servers
 - [ ] No hardcoded absolute paths in instructions
 - [ ] Tested with target model (Haiku/Sonnet/Opus)
+- [ ] Validate with: `npx skills check`
 
 ## Example: Minimal Skill
 
@@ -117,35 +192,50 @@ description: Responds with a friendly greeting. Use when the user says "hello" o
 Greet the user warmly. If you know their name from conversation context, use it.
 ```
 
-## Example: Skill with Scripts
+## Example: Skill with Scripts and MCP
 
 ```
-db-migrate/
+playwright-testing/
 ├── SKILL.md
-├── scripts/
-│   └── migrate.sh
-└── references/
-    └── schema-conventions.md
+├── setup.yaml
+└── scripts/
+    └── run-tests.py
 ```
 
 ```yaml
 ---
-name: db-migrate
-description: Generate and run database migrations. Use when the user asks to "add a column", "create a table", or "migrate the database".
-compatibility: Requires PostgreSQL client (psql) and Python 3.10+
+name: playwright-testing
+description: UI/E2E test automation with Playwright. Use when the user asks to "test the UI", "automate browser tests", or "write E2E tests".
+compatibility: Requires Node.js 18+
 metadata:
-  author: platform-team
-  version: "2.0.0"
+  author: octobots
+  version: "1.0.0"
 ---
 
-# Database Migrations
+# Playwright Testing
 
-Generate migration files following project conventions. See `references/schema-conventions.md` for naming and type rules.
+Browser-based UI and E2E testing via the Playwright MCP server.
+```
 
-## Steps
+```yaml
+# setup.yaml
+dependencies:
+  mcp:
+    - name: playwright
+      command: npx
+      args: ["@playwright/mcp@latest"]
+      env: {}
+permissions:
+  network: true
+  shell: false
+```
 
-1. Read the current schema from `db/schema.sql`
-2. Generate migration with `scripts/migrate.sh create "description"`
-3. Edit the generated file to add SQL
-4. Run with `scripts/migrate.sh apply`
+```python
+# scripts/run-tests.py
+# /// script
+# dependencies = ["pytest>=8.0.0"]
+# ///
+
+import subprocess
+# ...
 ```

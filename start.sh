@@ -25,11 +25,17 @@ PROJECT_DIR="$(pwd)"
 BASE_ROLES="$SCRIPT_DIR/roles"
 LOCAL_ROLES="$PROJECT_DIR/.octobots/roles"
 
-# ── Resolve role directory (.octobots/ overrides octobots/) ───────────────
+# ── Resolve role directory ────────────────────────────────────────────────
+# Resolution order:
+#   1. .octobots/roles/<role>/      project overrides
+#   2. .claude/agents/<role>/       installed via npx github:arozumenko/<role>-agent init
+#   3. octobots/roles/<role>/       bundled fallback
 resolve_role() {
     local role="$1"
     if [[ -f "$LOCAL_ROLES/$role/AGENT.md" ]]; then
         echo "$LOCAL_ROLES/$role"
+    elif [[ -f "$PROJECT_DIR/.claude/agents/$role/AGENT.md" ]]; then
+        echo "$PROJECT_DIR/.claude/agents/$role"
     elif [[ -f "$BASE_ROLES/$role/AGENT.md" ]]; then
         echo "$BASE_ROLES/$role"
     else

@@ -1,0 +1,84 @@
+{
+  "_comment": "Octobots agent registry. Add entries here to make agents available in the team selector. Used by install.sh and scout during onboarding.",
+
+  "agents": [
+    {
+      "id": "scout",
+      "repo": "arozumenko/scout-agent",
+      "description": "Kit — codebase scout and project configurator",
+      "role": "scout",
+      "required": true
+    },
+    {
+      "id": "project-manager",
+      "repo": "arozumenko/pm-agent",
+      "description": "Max — orchestrates tasks, routes work, tracks progress",
+      "role": "project-manager"
+    },
+    {
+      "id": "python-dev",
+      "repo": "arozumenko/python-dev-agent",
+      "description": "Py — methodical Python developer",
+      "role": "python-dev"
+    },
+    {
+      "id": "js-dev",
+      "repo": "arozumenko/js-dev-agent",
+      "description": "Jay — TypeScript / React / Node developer",
+      "role": "js-dev"
+    },
+    {
+      "id": "ba",
+      "repo": "arozumenko/ba-agent",
+      "description": "Alex — requirements, user stories, acceptance criteria",
+      "role": "ba"
+    },
+    {
+      "id": "tech-lead",
+      "repo": "arozumenko/tech-lead-agent",
+      "description": "Rio — technical decomposition, interface design, code review",
+      "role": "tech-lead"
+    },
+    {
+      "id": "qa-sage",
+      "repo": "arozumenko/qa-engineer-agent",
+      "description": "Sage — meticulous octobots-native QA engineer",
+      "role": "qa-engineer",
+      "group": "qa"
+    },
+    {
+      "id": "qa-onetest",
+      "repo": "onetest-ai/qa-agent",
+      "description": "OneTest QA — 13 specialist domains (a11y, security, UX, performance, privacy...)",
+      "role": "qa-engineer",
+      "group": "qa"
+    }
+  ],
+
+  "presets": [
+    {
+      "name": "Full-stack web team",
+      "description": "PM + BA + Tech Lead + Python Dev + JS Dev + QA",
+      "agents": ["scout", "project-manager", "ba", "tech-lead", "python-dev", "js-dev"],
+      "qa": "qa-onetest"
+    },
+    {
+      "name": "Python backend team",
+      "description": "PM + Tech Lead + Python Dev + QA",
+      "agents": ["scout", "project-manager", "tech-lead", "python-dev"],
+      "qa": "qa-onetest"
+    },
+    {
+      "name": "Minimal starter",
+      "description": "PM + Python Dev — quickstart, expand later",
+      "agents": ["scout", "project-manager", "python-dev"],
+      "qa": null
+    },
+    {
+      "name": "Custom",
+      "description": "Pick your own team",
+      "agents": [],
+      "qa": null
+    }
+  ]
+}
