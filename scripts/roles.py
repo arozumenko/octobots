@@ -22,12 +22,14 @@ ROLE_ALIASES: dict[str, str] = {
     "sage": "qa-engineer",
     "kit": "scout",
     "scout": "scout",
+    "pa": "personal-assistant",
     # Full names (identity mapping)
     "project-manager": "project-manager",
     "tech-lead": "tech-lead",
     "python-dev": "python-dev",
     "js-dev": "js-dev",
     "qa-engineer": "qa-engineer",
+    "personal-assistant": "personal-assistant",
     # Broadcast aliases
     "all": "all",
     "everyone": "all",
@@ -43,6 +45,7 @@ ROLE_DISPLAY: dict[str, str] = {
     "js-dev": "⚡ js",
     "qa-engineer": "🧪 qa",
     "scout": "🔍 scout",
+    "personal-assistant": "🟣 pa",
 }
 
 

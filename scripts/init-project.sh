@@ -20,16 +20,21 @@ RUNTIME="$PROJECT_DIR/.octobots"
 UPDATE=0
 ADHOC_ROLE=""
 ADHOC_SKILL=""
+MODE=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --update)         UPDATE=1; shift ;;
         --role)           ADHOC_ROLE="${2:?--role requires owner/repo}"; shift 2 ;;
         --skill)          ADHOC_SKILL="${2:?--skill requires owner/repo}"; shift 2 ;;
+        --mode)           MODE="${2:?--mode requires a value}"; shift 2 ;;
         *)                shift ;;
     esac
 done
 
 echo "Initializing .octobots/ in $PROJECT_DIR"
+
+# Normalise mode aliases
+[[ "$MODE" == "pa" ]] && MODE="personal-assistant"
 
 # ── Create directory structure ──────────────────────────────────────────────
 mkdir -p "$RUNTIME/memory"
@@ -38,9 +43,51 @@ mkdir -p "$RUNTIME/skills"
 mkdir -p "$RUNTIME/agents"
 mkdir -p "$RUNTIME/registry"
 
+# ── Personal Assistant mode — extra directories + persona templates ─────────
+if [[ "$MODE" == "personal-assistant" ]]; then
+    mkdir -p "$RUNTIME/pa-inbox/processed"
+    mkdir -p "$RUNTIME/persona"
+
+    # Copy persona templates if not already present
+    PA_PERSONA_SRC="$OCTOBOTS_DIR/roles/personal-assistant/persona"
+    if [[ -d "$PA_PERSONA_SRC" ]]; then
+        for tmpl in USER.md TOOLS.md access-control.yaml; do
+            if [[ ! -f "$RUNTIME/persona/$tmpl" ]]; then
+                cp "$PA_PERSONA_SRC/$tmpl" "$RUNTIME/persona/$tmpl"
+                echo "  Created persona/$tmpl"
+            fi
+        done
+    fi
+
+    # Write .env.octobots for single-worker PA mode
+    if [[ ! -f "$PROJECT_DIR/.env.octobots" ]]; then
+        cat > "$PROJECT_DIR/.env.octobots" << 'ENVEOF'
+OCTOBOTS_WORKERS=personal-assistant
+OCTOBOTS_EXCLUDED_ROLES=project-manager,python-dev,js-dev,qa-engineer,ba,tech-lead,scout
+ENVEOF
+        echo "  Created .env.octobots (PA mode)"
+    fi
+
+    echo ""
+    echo "Personal Assistant mode enabled."
+fi
+
 # ── Create board.md (team whiteboard) ───────────────────────────────────────
 if [[ ! -f "$RUNTIME/board.md" ]]; then
-    cat > "$RUNTIME/board.md" << 'EOF'
+    if [[ "$MODE" == "personal-assistant" ]]; then
+        cat > "$RUNTIME/board.md" << 'EOF'
+# PA Board
+
+## Status
+
+_Updated by supervisor._
+
+## Open Loops
+
+## Notes
+EOF
+    else
+        cat > "$RUNTIME/board.md" << 'EOF'
 # Team Board
 
 Shared state for all octobots roles. Read before starting work. Update when you learn something the team should know.
@@ -61,6 +108,7 @@ _Updated by supervisor from taskbox state._
 
 ## Parking Lot
 EOF
+    fi
     echo "  Created board.md"
 fi
 
@@ -466,21 +514,43 @@ else
 fi
 
 echo ""
-echo "Done. Structure:"
-echo "  .claude/"
-echo "  ├── agents/               Symlinks → octobots roles + shared agents"
-echo "  └── skills/               Symlinks → octobots skills"
-echo "  .octobots/"
-echo "  ├── board.md              Team whiteboard"
-echo "  ├── memory/               Per-role persistent learnings"
-echo "  ├── roles/                Project-specific role overrides"
-echo "  ├── skills/               Project-specific skills"
-echo "  ├── agents/               Project-specific agents"
-echo "  ├── profile.md            Project card (scout generates)"
-echo "  ├── relay.db              Taskbox database"
-echo "  └── workers/              Isolated worker environments (each with .claude/ seeded)"
-echo "      ├── python-dev/       Own repo clones + shared venv"
-echo "      ├── js-dev/           Own repo clones + shared node_modules"
-echo "      └── qa-engineer/      Own repo clones"
-echo ""
-echo "Next: octobots/start.sh scout  (to explore and generate project config)"
+if [[ "$MODE" == "personal-assistant" ]]; then
+    echo "Done. Structure:"
+    echo "  .octobots/"
+    echo "  ├── board.md              PA board"
+    echo "  ├── persona/"
+    echo "  │   ├── USER.md           Your profile (edit: timezone, quiet hours)"
+    echo "  │   ├── TOOLS.md          Environment config (edit: vault path, filters)"
+    echo "  │   └── access-control.yaml  Routing rules"
+    echo "  ├── pa-inbox/             Drop files here for PA to process"
+    echo "  │   └── processed/        Processed file archive"
+    echo "  ├── relay.db              Taskbox database"
+    echo "  └── workers/"
+    echo "      └── personal-assistant/"
+    echo ""
+    echo "Next steps:"
+    echo "  1. Edit .octobots/persona/USER.md — add your timezone and quiet hours"
+    echo "  2. Edit .octobots/persona/TOOLS.md — add Obsidian vault path and email filters"
+    echo "  3. Run: python3 .claude/skills/msgraph/scripts/auth.py login  (if using M365)"
+    echo "  4. Start: python3 octobots/scripts/supervisor.py"
+    echo "  5. Drop files into .octobots/pa-inbox/ to send to your PA"
+else
+    echo "Done. Structure:"
+    echo "  .claude/"
+    echo "  ├── agents/               Symlinks → octobots roles + shared agents"
+    echo "  └── skills/               Symlinks → octobots skills"
+    echo "  .octobots/"
+    echo "  ├── board.md              Team whiteboard"
+    echo "  ├── memory/               Per-role persistent learnings"
+    echo "  ├── roles/                Project-specific role overrides"
+    echo "  ├── skills/               Project-specific skills"
+    echo "  ├── agents/               Project-specific agents"
+    echo "  ├── profile.md            Project card (scout generates)"
+    echo "  ├── relay.db              Taskbox database"
+    echo "  └── workers/              Isolated worker environments (each with .claude/ seeded)"
+    echo "      ├── python-dev/       Own repo clones + shared venv"
+    echo "      ├── js-dev/           Own repo clones + shared node_modules"
+    echo "      └── qa-engineer/      Own repo clones"
+    echo ""
+    echo "Next: octobots/start.sh scout  (to explore and generate project config)"
+fi
