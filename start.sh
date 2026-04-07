@@ -13,12 +13,13 @@
 set -euo pipefail
 
 # ── Preflight ───────────────────────────────────────────────────────────────
-for cmd in claude python3; do
+for cmd in python3; do
     if ! command -v "$cmd" &>/dev/null; then
         echo "Error: $cmd not found. Install it first." >&2
         exit 1
     fi
 done
+# claude vs copilot binary check is deferred until we know the role's runtime.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(pwd)"
@@ -144,33 +145,79 @@ mkdir -p "$PROJECT_DIR/.octobots/memory"
 export OCTOBOTS_DB="$PROJECT_DIR/.octobots/relay.db"
 python3 "$SCRIPT_DIR/skills/taskbox/scripts/relay.py" init > /dev/null 2>&1 || true
 
-# ── Register role as a named agent ───────────────────────────────────────
-register_agent "$ROLE" "$ROLE_DIR"
+# ── Detect runtime (claude | copilot) from AGENT.md frontmatter ──────────
+# Default = claude. To opt a role into Copilot CLI, add `runtime: copilot`
+# to its AGENT.md frontmatter. Mixed teams are fine — every role decides
+# independently, and the supervisor uses the same dispatch logic.
+RUNTIME=$(awk '
+    /^---[[:space:]]*$/ { fm = !fm; next }
+    fm && /^runtime:/ { sub(/^runtime:[[:space:]]*/, ""); print; exit }
+' "$ROLE_DIR/AGENT.md")
+RUNTIME="${RUNTIME:-claude}"
 
-# ── Build command ────────────────────────────────────────────────────────
-CMD=(
-    env
-    "OCTOBOTS_ID=$ROLE"
-    "OCTOBOTS_DB=$OCTOBOTS_DB"
-    "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1"
-)
-# Forward LLM provider config (set above from .env.octobots / shortcut).
-for v in ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_MODEL ANTHROPIC_SMALL_FAST_MODEL OCTOBOTS_LLM_PROVIDER; do
-    [[ -n "${!v:-}" ]] && CMD+=("$v=${!v}")
-done
-CMD+=(
-    claude
-    --agent "$ROLE"
-    --dangerously-skip-permissions
-)
+# ── Build command per runtime ────────────────────────────────────────────
+case "$RUNTIME" in
+    claude)
+        command -v claude &>/dev/null || { echo "Error: claude binary not found." >&2; exit 1; }
+        register_agent "$ROLE" "$ROLE_DIR"
+        CMD=(
+            env
+            "OCTOBOTS_ID=$ROLE"
+            "OCTOBOTS_DB=$OCTOBOTS_DB"
+            "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1"
+        )
+        for v in ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_MODEL ANTHROPIC_SMALL_FAST_MODEL OCTOBOTS_LLM_PROVIDER; do
+            [[ -n "${!v:-}" ]] && CMD+=("$v=${!v}")
+        done
+        CMD+=(claude --agent "$ROLE" --dangerously-skip-permissions)
+        BANNER="Claude Code"
+        ;;
+    copilot)
+        command -v copilot &>/dev/null || { echo "Error: copilot binary not found. Install: curl -fsSL https://gh.io/copilot-install | bash" >&2; exit 1; }
+        # Materialize the role into Copilot's agents dir on every launch so
+        # edits to AGENT.md propagate without a manual sync step.
+        python3 "$SCRIPT_DIR/scripts/sync-copilot-agents.py" "$ROLE_DIR" >&2
+        # Reuse the GitHub token octobots already provisions for gh CLI.
+        : "${GH_TOKEN:=${GITHUB_TOKEN:-}}"
+        if [[ -z "${GH_TOKEN:-}" ]] && command -v gh &>/dev/null; then
+            GH_TOKEN="$(gh auth token 2>/dev/null || true)"
+        fi
+        CMD=(
+            env
+            "OCTOBOTS_ID=$ROLE"
+            "OCTOBOTS_DB=$OCTOBOTS_DB"
+        )
+        [[ -n "${GH_TOKEN:-}" ]] && CMD+=("GH_TOKEN=$GH_TOKEN")
+        CMD+=(copilot --agent "$ROLE" --allow-all)
+        BANNER="GitHub Copilot CLI"
+        ;;
+    *)
+        echo "Error: unknown runtime '$RUNTIME' in $ROLE_DIR/AGENT.md (expected: claude | copilot)" >&2
+        exit 1
+        ;;
+esac
 
 if [[ "${2:-}" == "--print" ]]; then
-    echo "${CMD[@]}"
+    # Redact secrets so --print is safe to paste into bug reports / share over
+    # the shoulder. Match KEY=VALUE pairs whose KEY looks sensitive.
+    for item in "${CMD[@]}"; do
+        if [[ "$item" == *=* ]]; then
+            k="${item%%=*}"
+            case "$k" in
+                *TOKEN*|*SECRET*|*KEY*|*PASSWORD*|GH_TOKEN|GITHUB_TOKEN|ANTHROPIC_AUTH_TOKEN)
+                    printf '%s=<redacted>\n' "$k" ;;
+                *) printf '%s\n' "$item" ;;
+            esac
+        else
+            printf '%s\n' "$item"
+        fi
+    done | tr '\n' ' '
+    echo
     exit 0
 fi
 
 # ── Launch ───────────────────────────────────────────────────────────────
-echo "Starting Claude Code as: $ROLE"
+echo "Starting $BANNER as: $ROLE  [runtime: $RUNTIME]"
 echo "Source: $ROLE_DIR"
 echo "Taskbox: $OCTOBOTS_DB"
 echo "---"

@@ -512,7 +512,9 @@ class Supervisor:
 
     def preflight(self) -> bool:
         ok = True
-        for cmd in ["tmux", "claude", "python3", "gh", "git"]:
+        # `claude` and `copilot` are checked lazily per-role in spawn(), since
+        # mixed teams may use either or both runtimes.
+        for cmd in ["tmux", "python3", "gh", "git"]:
             if not shutil.which(cmd):
                 console.print(f"[red]✗ {cmd} not found[/red]")
                 ok = False
@@ -693,13 +695,50 @@ class Supervisor:
                     if not worker_claude.exists():
                         worker_claude.symlink_to(project_claude)
 
-        claude_cmd = (
-            f"{gh_env}OCTOBOTS_ID={role} OCTOBOTS_DB={db_path} "
-            f"CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1 "
-            f"claude --agent '{source_role}' --dangerously-skip-permissions"
-        )
-        # cd + launch in one atomic command so Claude starts from launch_dir.
-        cmd = f"cd '{launch_dir}' && {claude_cmd}"
+        # ── Per-role runtime dispatch (claude | copilot) ─────────────────
+        # Read `runtime:` from AGENT.md frontmatter; default = claude.
+        runtime = "claude"
+        if role_dir and (role_dir / "AGENT.md").is_file():
+            import re as _re_rt
+            _txt = (role_dir / "AGENT.md").read_text()
+            _m = _re_rt.search(r"^---\s*\n(.*?)\n---", _txt, _re_rt.DOTALL)
+            if _m:
+                _rt = _re_rt.search(r"^runtime:\s*(\S+)", _m.group(1), _re_rt.MULTILINE)
+                if _rt:
+                    runtime = _rt.group(1).strip()
+
+        if runtime == "claude":
+            if not shutil.which("claude"):
+                console.print(f"[red]✗ {role}: claude binary not found[/red]")
+                return
+            agent_cmd = (
+                f"{gh_env}OCTOBOTS_ID={role} OCTOBOTS_DB={db_path} "
+                f"CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1 "
+                f"claude --agent '{source_role}' --dangerously-skip-permissions"
+            )
+        elif runtime == "copilot":
+            if not shutil.which("copilot"):
+                console.print(f"[red]✗ {role}: copilot binary not found (https://gh.io/copilot-install)[/red]")
+                return
+            # Materialize translated .agent.md into $COPILOT_HOME/agents/.
+            try:
+                subprocess.run(
+                    ["python3", str(OCTOBOTS_DIR / "scripts" / "sync-copilot-agents.py"), str(role_dir)],
+                    check=True, capture_output=True,
+                )
+            except subprocess.CalledProcessError as e:
+                console.print(f"[red]✗ {role}: copilot agent sync failed: {e.stderr.decode().strip()}[/red]")
+                return
+            agent_cmd = (
+                f"{gh_env}OCTOBOTS_ID={role} OCTOBOTS_DB={db_path} "
+                f"copilot --agent '{source_role}' --allow-all"
+            )
+        else:
+            console.print(f"[red]✗ {role}: unknown runtime '{runtime}' (expected claude|copilot)[/red]")
+            return
+
+        # cd + launch in one atomic command so the agent starts from launch_dir.
+        cmd = f"cd '{launch_dir}' && {agent_cmd}"
         self.tmux.send_keys(pane, cmd, confirm_paste=True)
         self.launched.add(role)
         time.sleep(3)
@@ -2265,10 +2304,19 @@ def main() -> None:
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     (RUNTIME_DIR / "memory").mkdir(exist_ok=True)
 
-    workers = args.workers or discover_workers()
-    if not workers:
-        console.print("[red]No workers found. Check octobots/roles/ or .octobots/roles/[/red]")
-        sys.exit(1)
+    # `--workers` not passed → auto-discover.
+    # `--workers` passed with zero args → start empty, build the team interactively
+    # via /role add. This is the "form your team from the REPL" mode.
+    if args.workers is None:
+        workers = discover_workers()
+        if not workers:
+            console.print("[red]No workers found. Check octobots/roles/ or .octobots/roles/[/red]")
+            console.print("[dim]Tip: re-run with --workers (no args) to start empty and add roles via /role add.[/dim]")
+            sys.exit(1)
+    else:
+        workers = args.workers
+        if not workers:
+            console.print("[yellow]Starting with no workers. Use /role add <name> to spawn roles.[/yellow]")
 
     supervisor = Supervisor(workers, args.interval)
 
