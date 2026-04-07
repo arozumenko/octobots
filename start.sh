@@ -25,6 +25,48 @@ PROJECT_DIR="$(pwd)"
 BASE_ROLES="$SCRIPT_DIR/roles"
 LOCAL_ROLES="$PROJECT_DIR/.octobots/roles"
 
+# ── Load .env.octobots ──────────────────────────────────────────────────────
+# Mirrors supervisor.py load_env(): pulls KEY=VALUE pairs into the env so
+# users can configure ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN / ANTHROPIC_MODEL
+# (or the OCTOBOTS_LLM_PROVIDER shortcut below) without editing this script.
+load_octobots_env() {
+    local f
+    for f in "$PROJECT_DIR/.env.octobots" "$SCRIPT_DIR/.env.octobots"; do
+        [[ -f "$f" ]] || continue
+        # shellcheck disable=SC2046
+        set -a
+        # Strip surrounding quotes from values; ignore comments/blank lines.
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            [[ -z "$line" || "$line" == \#* || "$line" != *=* ]] && continue
+            local k="${line%%=*}" v="${line#*=}"
+            k="${k// /}"
+            v="${v%\"}"; v="${v#\"}"; v="${v%\'}"; v="${v#\'}"
+            # Don't override values already exported in the parent shell.
+            [[ -z "${!k+x}" ]] && export "$k=$v"
+        done < "$f"
+        set +a
+    done
+}
+load_octobots_env
+
+# ── LLM provider shortcut ──────────────────────────────────────────────────
+# OCTOBOTS_LLM_PROVIDER=ollama   → talk to a local Anthropic-compatible proxy
+# OCTOBOTS_LLM_PROVIDER=anthropic → default cloud (no-op)
+# Anything else is treated as "user knows what they're doing": we just pass
+# whatever ANTHROPIC_* vars they set straight through to claude.
+case "${OCTOBOTS_LLM_PROVIDER:-anthropic}" in
+    ollama)
+        # Defaults assume claude-code-router / LiteLLM running on :8080.
+        # See docs/ollama.md for proxy setup.
+        export ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL:-${OCTOBOTS_OLLAMA_BASE_URL:-http://localhost:8080}}"
+        export ANTHROPIC_AUTH_TOKEN="${ANTHROPIC_AUTH_TOKEN:-ollama-local}"
+        export ANTHROPIC_MODEL="${ANTHROPIC_MODEL:-${OCTOBOTS_OLLAMA_MODEL:-qwen2.5-coder:32b}}"
+        # Claude Code skips its own auth flow when these are present.
+        ;;
+    anthropic|"") : ;;
+    *) : ;;  # custom provider — trust user-supplied ANTHROPIC_* vars
+esac
+
 # ── Resolve role directory ────────────────────────────────────────────────
 # Resolution order:
 #   1. .octobots/roles/<role>/      project overrides
@@ -111,6 +153,12 @@ CMD=(
     "OCTOBOTS_ID=$ROLE"
     "OCTOBOTS_DB=$OCTOBOTS_DB"
     "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1"
+)
+# Forward LLM provider config (set above from .env.octobots / shortcut).
+for v in ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_MODEL ANTHROPIC_SMALL_FAST_MODEL OCTOBOTS_LLM_PROVIDER; do
+    [[ -n "${!v:-}" ]] && CMD+=("$v=${!v}")
+done
+CMD+=(
     claude
     --agent "$ROLE"
     --dangerously-skip-permissions
