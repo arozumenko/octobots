@@ -497,13 +497,15 @@ class Supervisor:
         self.launched: set[str] = set()
         self._role_source: dict[str, str] = {}  # worker_id → source role (for clones)
         self._running = True
-        # Per-role recycle state for Ollama-backed workers (auto-compact is
-        # disabled for them, so the supervisor periodically asks the role to
-        # checkpoint important state to memory and then issues /clear).
-        # role → next-recycle-epoch
-        self._ollama_recycle_next: dict[str, float] = {}
-        # role → epoch when checkpoint prompt was sent (None = not pending)
-        self._ollama_recycle_pending: dict[str, float] = {}
+        # Per-role recycle state for Ollama-backed workers. Auto-compact is
+        # disabled for them; supervisor recycles the session when context
+        # usage crosses a threshold. Three-stage state machine per role:
+        #   stage 0 (idle)         → entry not in dict
+        #   stage 1 (checkpointed) → {"checkpoint_at": epoch}
+        #   stage 2 (cleared)      → {"checkpoint_at": ..., "cleared_at": epoch}
+        self._ollama_recycle: dict[str, dict] = {}
+        # One-shot warning so we don't spam logs when jsonl can't be located.
+        self._ollama_jsonl_warned: set[str] = set()
 
         # Scheduler
         self.job_store = JobStore(RUNTIME_DIR / "schedule.json")
@@ -1329,32 +1331,125 @@ class Supervisor:
         role_var = "OCTOBOTS_OLLAMA_MODEL_" + role.upper().replace("-", "_")
         return os.environ.get(role_var) or os.environ.get("OCTOBOTS_OLLAMA_MODEL", "")
 
+    def _ollama_context_usage(self, role: str) -> tuple[int, int] | None:
+        """Return (used_tokens, limit) for a role, or None if unknown.
+
+        Reads the most recently modified jsonl transcript under
+        ~/.claude/projects/<encoded-cwd>/, takes the last assistant turn's
+        usage.input_tokens (which is what Claude Code will send on the
+        next request — the relevant number for compaction risk).
+        """
+        # Resolve the role's launch dir the same way spawn() does.
+        source_role = self._role_source.get(role, role)
+        role_dir = resolve_role(source_role)
+        worker_dir = RUNTIME_DIR / "workers" / role
+        workspace_kind = "shared"
+        if role_dir and (role_dir / "AGENT.md").is_file():
+            try:
+                fm_text = (role_dir / "AGENT.md").read_text(encoding="utf-8", errors="replace")
+                import re as _re_ws
+                m = _re_ws.search(r'^workspace:\s*(\w+)', fm_text, _re_ws.MULTILINE)
+                if m:
+                    workspace_kind = m.group(1).strip().lower()
+            except OSError:
+                pass
+        forces_root = role_dir and (role_dir / ".workspace-root").is_file()
+        if forces_root or workspace_kind != "clone":
+            launch_dir = PROJECT_DIR
+        else:
+            launch_dir = worker_dir if worker_dir.is_dir() else PROJECT_DIR
+
+        # Claude Code encodes the cwd by replacing path separators with '-'.
+        # /Users/foo/bar → -Users-foo-bar
+        encoded = str(launch_dir).replace("/", "-")
+        projects_root = Path.home() / ".claude" / "projects" / encoded
+        if not projects_root.is_dir():
+            if role not in self._ollama_jsonl_warned:
+                console.print(f"[dim yellow]recycle: no transcript dir for {role} ({projects_root})[/dim yellow]")
+                self._ollama_jsonl_warned.add(role)
+            return None
+
+        try:
+            jsonls = sorted(projects_root.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+        except OSError:
+            return None
+        if not jsonls:
+            return None
+
+        # Walk the most recent jsonl backwards for the last usage.input_tokens.
+        try:
+            with jsonls[0].open("rb") as f:
+                f.seek(0, 2)
+                size = f.tell()
+                # Read the tail (last ~64KB) — usage lives on assistant turns.
+                read = min(size, 65536)
+                f.seek(size - read)
+                tail = f.read().decode("utf-8", errors="replace")
+        except OSError:
+            return None
+
+        used = 0
+        for line in reversed(tail.splitlines()):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            usage = (obj.get("message") or {}).get("usage") or obj.get("usage")
+            if isinstance(usage, dict) and "input_tokens" in usage:
+                used = (
+                    int(usage.get("input_tokens", 0))
+                    + int(usage.get("cache_read_input_tokens", 0))
+                    + int(usage.get("cache_creation_input_tokens", 0))
+                )
+                break
+
+        if used <= 0:
+            return None
+
+        # Per-role limit override; default 128k (most modern Ollama models).
+        role_limit_var = "OCTOBOTS_OLLAMA_CONTEXT_LIMIT_" + role.upper().replace("-", "_")
+        try:
+            limit = int(
+                os.environ.get(role_limit_var)
+                or os.environ.get("OCTOBOTS_OLLAMA_CONTEXT_LIMIT", "128000")
+            )
+        except ValueError:
+            limit = 128000
+        return used, limit
+
     def _recycle_ollama_workers(self) -> None:
-        """Periodically checkpoint+/clear Ollama-backed panes.
+        """Three-stage context-aware recycle for Ollama-backed panes.
 
-        Local models choke on Claude Code's auto-compact path; we disable it
-        at launch and recycle the session here instead. Two-stage flow:
+        Local models choke on Claude Code's auto-compact path; we disable
+        it at launch and recycle the session here when context usage
+        crosses a threshold. Per-role state machine:
 
-        1. Send a checkpoint prompt asking the role to flush important state
-           to its memory file.
-        2. After a short grace period (default 60s), send `/clear`. The role
-           re-reads its persona files and memory on the next message, so the
-           important context survives the session reset.
+        1. Checkpoint — ask the role to flush state to MEMORY.md
+        2. /clear     — wipe session after grace period
+        3. Re-init    — tell the cleared role to re-read its persona files
+                        and memory so it isn't a blank slate for the user
 
-        Tunables (via .env.octobots):
-          OCTOBOTS_OLLAMA_RECYCLE_HOURS  — interval between recycles (default 4)
-          OCTOBOTS_OLLAMA_RECYCLE_GRACE  — seconds between checkpoint and /clear
-                                           (default 60)
+        Tunables (.env.octobots):
+          OCTOBOTS_OLLAMA_RECYCLE_AT      — usage % that triggers (default 70)
+          OCTOBOTS_OLLAMA_RECYCLE_GRACE   — checkpoint→/clear seconds (default 60)
+          OCTOBOTS_OLLAMA_REINIT_DELAY    — /clear→re-init seconds (default 5)
+          OCTOBOTS_OLLAMA_CONTEXT_LIMIT   — model context window (default 128000)
         """
         try:
-            interval_h = float(os.environ.get("OCTOBOTS_OLLAMA_RECYCLE_HOURS", "4"))
+            threshold_pct = float(os.environ.get("OCTOBOTS_OLLAMA_RECYCLE_AT", "70"))
         except ValueError:
-            interval_h = 4.0
+            threshold_pct = 70.0
         try:
             grace_s = float(os.environ.get("OCTOBOTS_OLLAMA_RECYCLE_GRACE", "60"))
         except ValueError:
             grace_s = 60.0
-        interval_s = max(interval_h * 3600.0, 300.0)  # floor at 5 min
+        try:
+            reinit_delay_s = float(os.environ.get("OCTOBOTS_OLLAMA_REINIT_DELAY", "5"))
+        except ValueError:
+            reinit_delay_s = 5.0
 
         now = time.time()
         for role in self.workers:
@@ -1366,36 +1461,60 @@ class Supervisor:
             if not pane:
                 continue
 
-            # Initialize the next-recycle deadline on first sight.
-            if role not in self._ollama_recycle_next:
-                self._ollama_recycle_next[role] = now + interval_s
-                continue
+            state = self._ollama_recycle.get(role, {})
 
-            pending_at = self._ollama_recycle_pending.get(role)
-
-            if pending_at is None:
-                # Stage 1: time to checkpoint?
-                if now < self._ollama_recycle_next[role]:
+            # Stage 0 → 1: idle, check usage and trigger if over threshold.
+            if not state:
+                usage = self._ollama_context_usage(role)
+                if usage is None:
+                    continue
+                used, limit = usage
+                pct = (used / limit) * 100.0 if limit else 0.0
+                if pct < threshold_pct:
                     continue
                 checkpoint_prompt = (
-                    "[supervisor] Context recycle in ~60s. Flush any in-progress "
-                    "state, open loops, and important context to your MEMORY.md "
-                    "now (use the Write tool). Do NOT reply via notify-user.sh — "
-                    "this is internal housekeeping. After this, your session will "
-                    "be cleared and you'll re-read your persona files on the next "
-                    "message."
+                    f"[supervisor] Your context is at {used:,}/{limit:,} tokens "
+                    f"({pct:.0f}%). Flush any in-progress state, open loops, and "
+                    f"important context to your MEMORY.md NOW using the Write tool. "
+                    f"Do NOT reply to the user via notify-user.sh — this is "
+                    f"internal housekeeping. Your session will be cleared in "
+                    f"{int(grace_s)}s and you'll be told to re-read your persona "
+                    f"files afterward."
                 )
                 self.tmux.send_keys(pane, checkpoint_prompt, confirm_paste=True)
-                self._ollama_recycle_pending[role] = now
-                console.print(f"[yellow]↻[/yellow] {role}: checkpoint sent (recycle in {int(grace_s)}s)")
-            else:
-                # Stage 2: grace period elapsed → /clear
-                if now - pending_at < grace_s:
+                self._ollama_recycle[role] = {"checkpoint_at": now}
+                console.print(f"[yellow]↻[/yellow] {role}: checkpoint @ {pct:.0f}% ({used:,}/{limit:,})")
+                continue
+
+            # Stage 1 → 2: grace period elapsed, send /clear.
+            if "cleared_at" not in state:
+                if now - state["checkpoint_at"] < grace_s:
                     continue
                 self.tmux.send_keys(pane, "/clear", confirm_paste=True)
-                self._ollama_recycle_pending.pop(role, None)
-                self._ollama_recycle_next[role] = now + interval_s
-                console.print(f"[green]✓[/green] {role}: session cleared (next recycle in {interval_h}h)")
+                state["cleared_at"] = now
+                console.print(f"[yellow]↻[/yellow] {role}: /clear sent")
+                continue
+
+            # Stage 2 → 0: send re-init prompt and reset state.
+            if now - state["cleared_at"] < reinit_delay_s:
+                continue
+            reinit_prompt = (
+                "[supervisor] Your session was just cleared to recover from "
+                "context pressure. Before doing anything else, re-read these "
+                "files to restore your identity and working state:\n"
+                "  1. Your AGENT.md and SOUL.md (in .claude/agents/<your-role>/)\n"
+                "  2. .octobots/persona/USER.md\n"
+                "  3. .octobots/persona/TOOLS.md\n"
+                "  4. .octobots/persona/access-control.yaml\n"
+                "  5. Your MEMORY.md (in .octobots/memory/)\n"
+                "  6. Open Loops.md in the Obsidian vault if you have one\n\n"
+                "Then sit idle and wait for the user. Do NOT reply via "
+                "notify-user.sh — this is internal housekeeping, not a user "
+                "message."
+            )
+            self.tmux.send_keys(pane, reinit_prompt, confirm_paste=True)
+            self._ollama_recycle.pop(role, None)
+            console.print(f"[green]✓[/green] {role}: re-init sent, recycle complete")
 
     def _check_worker_health(self) -> None:
         """Monitor worker panes for context pressure and auto-recover.
