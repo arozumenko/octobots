@@ -155,10 +155,26 @@ RUNTIME=$(awk '
 ' "$ROLE_DIR/AGENT.md")
 RUNTIME="${RUNTIME:-claude}"
 
+# ── Local-model opt-in (Ollama) ──────────────────────────────────────────
+# Pure config — set in .env.octobots, no AGENT.md edits needed:
+#   OCTOBOTS_OLLAMA_ROLES="personal-assistant ba"   # who runs locally
+#   OCTOBOTS_OLLAMA_MODEL=gemma4:26b                # default model
+#   OCTOBOTS_OLLAMA_MODEL_PERSONAL_ASSISTANT=...    # optional per-role override
+# (per-role var: uppercase the role name and replace dashes with underscores)
+OLLAMA_MODEL=""
+if [[ -n "${OCTOBOTS_OLLAMA_ROLES:-}" ]]; then
+    for r in $OCTOBOTS_OLLAMA_ROLES; do
+        if [[ "$r" == "$ROLE" ]]; then
+            _role_var="OCTOBOTS_OLLAMA_MODEL_$(echo "$ROLE" | tr 'a-z-' 'A-Z_')"
+            OLLAMA_MODEL="${!_role_var:-${OCTOBOTS_OLLAMA_MODEL:-}}"
+            break
+        fi
+    done
+fi
+
 # ── Build command per runtime ────────────────────────────────────────────
 case "$RUNTIME" in
     claude)
-        command -v claude &>/dev/null || { echo "Error: claude binary not found." >&2; exit 1; }
         register_agent "$ROLE" "$ROLE_DIR"
         CMD=(
             env
@@ -166,11 +182,24 @@ case "$RUNTIME" in
             "OCTOBOTS_DB=$OCTOBOTS_DB"
             "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1"
         )
-        for v in ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_MODEL ANTHROPIC_SMALL_FAST_MODEL OCTOBOTS_LLM_PROVIDER; do
-            [[ -n "${!v:-}" ]] && CMD+=("$v=${!v}")
-        done
-        CMD+=(claude --agent "$ROLE" --dangerously-skip-permissions)
-        BANNER="Claude Code"
+        if [[ -n "$OLLAMA_MODEL" ]]; then
+            # Local model via `ollama launch claude` — Ollama sets the
+            # ANTHROPIC_* env vars and exec's real Claude Code under the hood.
+            command -v ollama &>/dev/null || { echo "Error: ollama binary not found (role '$ROLE' is in OCTOBOTS_OLLAMA_ROLES with model $OLLAMA_MODEL)." >&2; exit 1; }
+            CMD+=(ollama launch claude --model "$OLLAMA_MODEL" --yes --
+                  --agent "$ROLE" --dangerously-skip-permissions)
+            BANNER="Claude Code via Ollama ($OLLAMA_MODEL)"
+        else
+            command -v claude &>/dev/null || { echo "Error: claude binary not found." >&2; exit 1; }
+            # Forward any global ANTHROPIC_* / OCTOBOTS_LLM_PROVIDER config
+            # the user set in .env.octobots. Per-role ollama_model takes
+            # precedence over these globals (handled by the if-branch above).
+            for v in ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_MODEL ANTHROPIC_SMALL_FAST_MODEL OCTOBOTS_LLM_PROVIDER; do
+                [[ -n "${!v:-}" ]] && CMD+=("$v=${!v}")
+            done
+            CMD+=(claude --agent "$ROLE" --dangerously-skip-permissions)
+            BANNER="Claude Code"
+        fi
         ;;
     copilot)
         command -v copilot &>/dev/null || { echo "Error: copilot binary not found. Install: curl -fsSL https://gh.io/copilot-install | bash" >&2; exit 1; }

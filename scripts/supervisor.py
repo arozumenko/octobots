@@ -707,15 +707,37 @@ class Supervisor:
                 if _rt:
                     runtime = _rt.group(1).strip()
 
+        # Local-model opt-in via .env.octobots (no AGENT.md edits needed):
+        #   OCTOBOTS_OLLAMA_ROLES="personal-assistant ba"
+        #   OCTOBOTS_OLLAMA_MODEL=gemma4:26b
+        #   OCTOBOTS_OLLAMA_MODEL_PERSONAL_ASSISTANT=...   (optional override)
+        ollama_model = ""
+        ollama_roles = os.environ.get("OCTOBOTS_OLLAMA_ROLES", "").split()
+        if role in ollama_roles:
+            role_var = "OCTOBOTS_OLLAMA_MODEL_" + role.upper().replace("-", "_")
+            ollama_model = os.environ.get(role_var) or os.environ.get("OCTOBOTS_OLLAMA_MODEL", "")
+
         if runtime == "claude":
-            if not shutil.which("claude"):
-                console.print(f"[red]✗ {role}: claude binary not found[/red]")
-                return
-            agent_cmd = (
-                f"{gh_env}OCTOBOTS_ID={role} OCTOBOTS_DB={db_path} "
-                f"CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1 "
-                f"claude --agent '{source_role}' --dangerously-skip-permissions"
-            )
+            if ollama_model:
+                # Per-role local model: wrap with `ollama launch claude`,
+                # which exec's real Claude Code with the right env vars set.
+                if not shutil.which("ollama"):
+                    console.print(f"[red]✗ {role}: ollama binary not found (role is in OCTOBOTS_OLLAMA_ROLES with model {ollama_model})[/red]")
+                    return
+                agent_cmd = (
+                    f"{gh_env}OCTOBOTS_ID={role} OCTOBOTS_DB={db_path} "
+                    f"ollama launch claude --model {ollama_model} --yes -- "
+                    f"--agent '{source_role}' --dangerously-skip-permissions"
+                )
+            else:
+                if not shutil.which("claude"):
+                    console.print(f"[red]✗ {role}: claude binary not found[/red]")
+                    return
+                agent_cmd = (
+                    f"{gh_env}OCTOBOTS_ID={role} OCTOBOTS_DB={db_path} "
+                    f"CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1 "
+                    f"claude --agent '{source_role}' --dangerously-skip-permissions"
+                )
         elif runtime == "copilot":
             if not shutil.which("copilot"):
                 console.print(f"[red]✗ {role}: copilot binary not found (https://gh.io/copilot-install)[/red]")

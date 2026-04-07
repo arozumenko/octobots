@@ -1,95 +1,126 @@
-# Running Octobots against a local Ollama model
+# Running Octobots roles on a local Ollama model
 
-Claude Code talks to Anthropic's Messages API. Ollama exposes an OpenAI-compatible
-API, not Anthropic-compatible — so you need a tiny translation proxy in between.
-Once that proxy is running, octobots can point every role at it via three env
-vars in `.env.octobots`. No code changes per role.
+As of Ollama v0.20+, Ollama exposes an Anthropic-compatible API directly and
+ships an `ollama launch claude` wrapper that boots real Claude Code against a
+local model with no proxy, no env-var juggling, and no extra binaries.
 
-## 1. Run Ollama
+Octobots integrates this at the role level: you opt **specific roles** into
+Ollama via `.env.octobots`, and they get wrapped with `ollama launch claude`
+automatically. Other roles in the same supervisor session keep talking to
+cloud Claude (or Copilot CLI). Mixed teams just work.
 
-```bash
-ollama serve                     # default: http://localhost:11434
-ollama pull qwen2.5-coder:32b    # or llama3.1:70b, deepseek-coder-v2, etc.
-```
-
-Pick a model that's actually competent at tool use — Claude Code leans hard on
-function calling. `qwen2.5-coder`, `llama3.1`, and `deepseek-coder-v2` are the
-usual suspects. Smaller models will technically launch but tend to fall over
-on multi-step tool chains.
-
-## 2. Run an Anthropic-compatible proxy
-
-Either of these works. Pick one.
-
-### Option A — claude-code-router (purpose-built)
+## Quick start (PA on local Gemma 4, rest of the team on cloud)
 
 ```bash
-npm install -g @musistudio/claude-code-router
-ccr start                        # listens on http://localhost:8080
+# 1. On the box that will run the supervisor
+ollama pull gemma4:26b
+ollama serve                    # leave running; listens on :11434
 ```
-
-Configure `~/.config/claude-code-router/config.json` to route to Ollama:
-
-```json
-{
-  "Providers": [{
-    "name": "ollama",
-    "api_base_url": "http://localhost:11434/v1/chat/completions",
-    "api_key": "ollama",
-    "models": ["qwen2.5-coder:32b"]
-  }],
-  "Router": { "default": "ollama,qwen2.5-coder:32b" }
-}
-```
-
-### Option B — LiteLLM (general-purpose)
 
 ```bash
-pip install 'litellm[proxy]'
-litellm --model ollama/qwen2.5-coder:32b --port 8080
+# 2. Add three lines to .env.octobots in your project root
+OCTOBOTS_OLLAMA_ROLES=personal-assistant
+OCTOBOTS_OLLAMA_MODEL=gemma4:26b
+# (optional) per-role overrides — uppercase the role, dashes → underscores:
+# OCTOBOTS_OLLAMA_MODEL_PERSONAL_ASSISTANT=gemma4:26b
 ```
-
-LiteLLM exposes an Anthropic-compatible endpoint at `/v1/messages` when called
-with `ANTHROPIC_BASE_URL=http://localhost:8080`.
-
-## 3. Tell octobots to use it
-
-Add to `.env.octobots` in the project root:
 
 ```bash
-OCTOBOTS_LLM_PROVIDER=ollama
-OCTOBOTS_OLLAMA_BASE_URL=http://localhost:8080
-OCTOBOTS_OLLAMA_MODEL=qwen2.5-coder:32b
+# 3. Boot
+python3 octobots/scripts/supervisor.py --workers personal-assistant
+# /bridge        ← start Telegram bridge when ready
 ```
 
-That's it. `octobots/start.sh <role>` and `python3 octobots/scripts/supervisor.py`
-both load `.env.octobots` and forward the resulting `ANTHROPIC_BASE_URL`,
-`ANTHROPIC_AUTH_TOKEN`, and `ANTHROPIC_MODEL` to every Claude Code instance they
-spawn — including tmux worker panes.
+That's it. The PA worker will be launched as:
 
-## Advanced — full passthrough
+```
+ollama launch claude --model gemma4:26b --yes -- \
+    --agent personal-assistant --dangerously-skip-permissions
+```
 
-If you want to bypass the shortcut (e.g. mix providers per role, point at a
-remote vLLM box, use Anthropic for some roles and Ollama for others), just set
-the raw vars in `.env.octobots`:
+…which is exactly the command you'd type by hand to run Claude Code against
+Ollama, just with octobots' env vars (`OCTOBOTS_ID`, `OCTOBOTS_DB`, etc.)
+preserved so taskbox / notify-user / GitHub bridges keep working.
+
+## How role selection works
+
+| `.env.octobots` setting | Effect |
+|---|---|
+| _unset_ | All roles run on cloud Claude (default behavior, unchanged) |
+| `OCTOBOTS_OLLAMA_ROLES=personal-assistant` | Only PA runs locally; everyone else on cloud |
+| `OCTOBOTS_OLLAMA_ROLES="personal-assistant ba"` | PA + BA local, dev + PM + tech-lead + QA cloud |
+| `OCTOBOTS_OLLAMA_MODEL=gemma4:26b` | Default model for everyone in the list above |
+| `OCTOBOTS_OLLAMA_MODEL_PERSONAL_ASSISTANT=qwen2.5:32b` | Per-role override (PA gets Qwen, others get the default) |
+
+The role-name → env-var transform is straightforward: uppercase, dashes
+become underscores. `personal-assistant` → `OCTOBOTS_OLLAMA_MODEL_PERSONAL_ASSISTANT`.
+`tech-lead` → `OCTOBOTS_OLLAMA_MODEL_TECH_LEAD`.
+
+Per-role overrides are read first; if unset, the role falls back to
+`OCTOBOTS_OLLAMA_MODEL`. If that's also unset for a role that's listed in
+`OCTOBOTS_OLLAMA_ROLES`, the role launches with no model — which `ollama
+launch` will reject. Set `OCTOBOTS_OLLAMA_MODEL` as the default to avoid this.
+
+## Sanity check
+
+`octobots/start.sh personal-assistant --print` shows the resolved command
+without launching it. Tokens are auto-redacted, so it's safe to paste:
 
 ```bash
-ANTHROPIC_BASE_URL=http://my-proxy.lan:4000
-ANTHROPIC_AUTH_TOKEN=sk-anything
-ANTHROPIC_MODEL=qwen2.5-coder:32b
-ANTHROPIC_SMALL_FAST_MODEL=qwen2.5-coder:7b
+OCTOBOTS_OLLAMA_ROLES=personal-assistant \
+OCTOBOTS_OLLAMA_MODEL=gemma4:26b \
+octobots/start.sh personal-assistant --print
 ```
 
-Per-role overrides: drop a role-specific `.env` next to the worker
-(`.octobots/workers/<role>/.env`) — it's symlinked from project root, so
-project-wide settings apply unless you replace the symlink with a real file.
+Expected output ends with:
+
+```
+… ollama launch claude --model gemma4:26b --yes -- --agent personal-assistant --dangerously-skip-permissions
+```
+
+If you see plain `claude --agent …` instead, the role isn't matched against
+`OCTOBOTS_OLLAMA_ROLES` — check spelling and that `.env.octobots` is being
+loaded.
+
+## Picking a model
+
+Claude Code leans hard on tool use. Smaller models will technically launch
+but tend to fall over on multi-step tool chains. Reasonable starting points:
+
+| Model | Size | Good for |
+|---|---|---|
+| `gemma4:26b` | ~18 GB | PA, journaling, summarization, knowledge-base curation |
+| `gemma4:31b` | ~20 GB | Same, with a bit more headroom |
+| `qwen2.5-coder:32b` | ~20 GB | Dev / QA roles where code edits matter |
+| `llama3.1:70b` | ~40 GB | Strongest tool-use among local options |
+| `kimi-k2.5:cloud` | _cloud_ | Ollama Cloud — bigger, faster, still routed via `ollama launch` |
+
+The "right" model depends on what each role does. PA (this guide's example)
+mostly summarizes and writes notes — Gemma 4 26B is fine. Don't put a
+tech-lead role on a 7B model and expect it to write production-ready epics.
 
 ## Caveats
 
-- Claude Code's agent loop expects strong tool-use behavior. Local models
-  drop tool calls, hallucinate file paths, and miscount line numbers more
-  often than Sonnet. Treat ollama-backed roles as "best effort" — fine for
-  scout / BA / drafting, rough for QA / tech-lead.
-- Subagents (`Agent` tool) inherit the same provider, so a slow local model
-  multiplies its latency cost when delegated to.
-- Telegram + GitHub bridges are unaffected; they don't go through the LLM.
+- **`ollama serve` must be running** on the same box as the supervisor (or
+  reachable on the network — set `OLLAMA_HOST` if remote).
+- **First launch downloads tens of GB.** Pull the model ahead of time with
+  `ollama pull <tag>` so the first agent boot isn't a 20-minute wait.
+- **Octobots subagents inherit the same model.** When a role spawns a
+  subagent (e.g. PM delegating to `taskbox-listener`), the subagent runs on
+  the *same* local model — multiplying its latency. If you orchestrate
+  heavily with subagents, keep the orchestrator on cloud Claude and put
+  the leaf workers on local models.
+- **Telegram + GitHub bridges are unaffected.** They don't go through the
+  LLM at all — they're shell scripts reading env vars.
+
+## Alternative: standalone, no octobots
+
+If you just want to verify Ollama + Claude Code work on your box before
+plugging into octobots:
+
+```bash
+ollama launch claude --model gemma4:26b
+```
+
+That drops you into a normal Claude Code session backed by Gemma 4. No
+octobots, no taskbox, no roles — just the plain CLI. Useful as a smoke test.
