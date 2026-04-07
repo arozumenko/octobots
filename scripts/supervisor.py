@@ -1362,7 +1362,11 @@ class Supervisor:
         # Claude Code encodes the cwd by replacing path separators with '-'.
         # /Users/foo/bar → -Users-foo-bar
         encoded = str(launch_dir).replace("/", "-")
-        projects_root = Path.home() / ".claude" / "projects" / encoded
+        # Honor CLAUDE_CONFIG_DIR (Claude Code's config root override),
+        # falling back to ~/.claude.
+        config_dir_env = os.environ.get("CLAUDE_CONFIG_DIR")
+        config_root = Path(config_dir_env) if config_dir_env else (Path.home() / ".claude")
+        projects_root = config_root / "projects" / encoded
         if not projects_root.is_dir():
             if role not in self._ollama_jsonl_warned:
                 console.print(f"[dim yellow]recycle: no transcript dir for {role} ({projects_root})[/dim yellow]")
