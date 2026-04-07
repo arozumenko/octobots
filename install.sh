@@ -113,44 +113,7 @@ else
     echo "  ⚠  pip not found — run: pip install -r octobots/scripts/requirements.txt"
 fi
 
-# ── Install published skills via npx skills add ───────────────────────────────
-
-echo ""
-echo "Installing skills..."
-if command -v npx &>/dev/null; then
-    # Read skill list from skills.json registry (default:true entries)
-    PUBLISHED_SKILLS=()
-    SKILL_IDS=()
-    while IFS=$'\t' read -r skill_id skill_repo; do
-        PUBLISHED_SKILLS+=("$skill_repo")
-        SKILL_IDS+=("$skill_id")
-    done < <(python3 -c "
-import json, sys
-data = json.load(open('$DEST/skills.json'))
-for s in data.get('skills', []):
-    if s.get('default', True):
-        print(s['id'] + '\t' + s['repo'])
-" 2>/dev/null)
-
-    for i in "${!PUBLISHED_SKILLS[@]}"; do
-        skill_repo="${PUBLISHED_SKILLS[$i]}"
-        skill_name="${SKILL_IDS[$i]}"
-        if [[ -d ".claude/skills/$skill_name" ]]; then
-            echo "  ✓ $skill_name (already installed)"
-        else
-            if npx skills add "$skill_repo" --yes 2>/dev/null; then
-                echo "  ✓ $skill_name"
-            else
-                echo "  ⚠  $skill_name — install failed"
-            fi
-        fi
-    done
-else
-    echo "  ⚠  npx not found — skipping skill install (Node.js required)"
-    echo "     Install manually: npx skills add arozumenko/skill-tdd  (etc.)"
-fi
-
-# ── Select and install agents ─────────────────────────────────────────────────
+# ── Select and install agents (BEFORE skills, so skills can be derived) ──────
 
 echo ""
 echo "Setting up your team..."
@@ -163,18 +126,68 @@ arozumenko/pm-agent
 arozumenko/python-dev-agent"
     }
 
-    while IFS= read -r agent_repo; do
-        [[ -z "$agent_repo" ]] && continue
+    while IFS= read -r agent_entry; do
+        [[ -z "$agent_entry" ]] && continue
+        # Entry is "owner/repo@ref" (ref defaults to "main" in select-agents.py)
+        agent_repo="${agent_entry%@*}"
+        agent_ref="${agent_entry##*@}"
+        [[ "$agent_ref" == "$agent_entry" ]] && agent_ref="main"
         repo_name="${agent_repo##*/}"
-        if npx "github:$agent_repo" init --all 2>/dev/null; then
-            echo "  ✓ $repo_name"
+        if npx "github:${agent_repo}#${agent_ref}" init --all 2>/dev/null; then
+            echo "  ✓ $repo_name @ $agent_ref"
         else
-            echo "  ⚠  $repo_name — install failed"
+            echo "  ⚠  $repo_name @ $agent_ref — install failed"
         fi
     done <<< "$SELECTED_REPOS"
 else
     echo "  ⚠  npx not found — skipping agent install (Node.js required)"
     echo "     Install manually: npx github:arozumenko/scout-agent init  (etc.)"
+fi
+
+# ── Install skills declared by selected agents ───────────────────────────────
+# Source of truth: the union of `skills:` frontmatter from every installed agent.
+# We then intersect with skills.json to map skill id → published repo, and
+# install only that subset. This replaces the old "default: true everywhere"
+# logic so users get exactly what their selected team needs — nothing more.
+
+echo ""
+echo "Installing skills required by your team..."
+if command -v npx &>/dev/null; then
+    REQUIRED_SKILLS=$(python3 "$DEST/scripts/resolve-skills.py" union)
+
+    if [[ -z "$REQUIRED_SKILLS" ]]; then
+        echo "  — no skills declared by selected agents"
+    else
+        while IFS= read -r skill_id; do
+            [[ -z "$skill_id" ]] && continue
+            # Already installed (e.g. by an agent installer that ships its own skills)?
+            if [[ -d ".claude/skills/$skill_id" ]]; then
+                echo "  ✓ $skill_id (already present)"
+                continue
+            fi
+            # Look up repo + pinned ref in skills.json registry
+            skill_entry=$(python3 -c "
+import json
+data = json.load(open('$DEST/skills.json'))
+for s in data.get('skills', []):
+    if s['id'] == '$skill_id':
+        print(s['repo'] + '@' + s.get('ref', 'main')); break
+" 2>/dev/null)
+            if [[ -z "$skill_entry" ]]; then
+                echo "  ⚠  $skill_id — not in skills.json registry, skipping"
+                continue
+            fi
+            skill_repo="${skill_entry%@*}"
+            skill_ref="${skill_entry##*@}"
+            if npx skills add "${skill_repo}#${skill_ref}" --yes 2>/dev/null; then
+                echo "  ✓ $skill_id @ $skill_ref"
+            else
+                echo "  ⚠  $skill_id @ $skill_ref — install failed (repo: $skill_repo)"
+            fi
+        done <<< "$REQUIRED_SKILLS"
+    fi
+else
+    echo "  ⚠  npx not found — skipping skill install (Node.js required)"
 fi
 
 # ── Process setup.yaml for bundled skills (MCP + other deps) ─────────────────
@@ -187,6 +200,13 @@ DEST="$DEST" python3 "$DEST/scripts/apply-skill-deps.py"
 
 echo ""
 bash "$DEST/scripts/init-project.sh"
+
+# ── Verify every agent's declared skills resolved ────────────────────────────
+
+echo ""
+echo "Verifying skill resolution..."
+python3 "$DEST/scripts/resolve-skills.py" verify || \
+    echo "  (some skills missing — install manually with 'npx skills add' or fix the agent's skills: list)"
 
 # ── .gitignore ────────────────────────────────────────────────────────────────
 

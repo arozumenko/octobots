@@ -1,10 +1,11 @@
 {
-  "_comment": "Octobots agent registry. Add entries here to make agents available in the team selector. Used by install.sh and scout during onboarding.",
+  "_comment": "Octobots agent registry. Each entry maps an agent id to a published GitHub repo and a pinned ref (commit SHA, tag, or branch). Used by install.sh and scout during onboarding.",
 
   "agents": [
     {
       "id": "scout",
       "repo": "arozumenko/scout-agent",
+      "ref": "main",
       "description": "Kit — codebase scout and project configurator",
       "role": "scout",
       "required": true
@@ -12,36 +13,42 @@
     {
       "id": "project-manager",
       "repo": "arozumenko/pm-agent",
+      "ref": "main",
       "description": "Max — orchestrates tasks, routes work, tracks progress",
       "role": "project-manager"
     },
     {
       "id": "python-dev",
       "repo": "arozumenko/python-dev-agent",
+      "ref": "main",
       "description": "Py — methodical Python developer",
       "role": "python-dev"
     },
     {
       "id": "js-dev",
       "repo": "arozumenko/js-dev-agent",
+      "ref": "main",
       "description": "Jay — TypeScript / React / Node developer",
       "role": "js-dev"
     },
     {
       "id": "ba",
       "repo": "arozumenko/ba-agent",
+      "ref": "main",
       "description": "Alex — requirements, user stories, acceptance criteria",
       "role": "ba"
     },
     {
       "id": "tech-lead",
       "repo": "arozumenko/tech-lead-agent",
+      "ref": "main",
       "description": "Rio — technical decomposition, interface design, code review",
       "role": "tech-lead"
     },
     {
       "id": "qa-sage",
       "repo": "arozumenko/qa-engineer-agent",
+      "ref": "main",
       "description": "Sage — meticulous octobots-native QA engineer",
       "role": "qa-engineer",
       "group": "qa"
@@ -49,6 +56,7 @@
     {
       "id": "qa-onetest",
       "repo": "onetest-ai/qa-agent",
+      "ref": "main",
       "description": "OneTest QA — 13 specialist domains (a11y, security, UX, performance, privacy...)",
       "role": "qa-engineer",
       "group": "qa"
@@ -56,6 +64,7 @@
     {
       "id": "personal-assistant",
       "repo": "arozumenko/personal-assistant-agent",
+      "ref": "main",
       "description": "PA — second-brain personal assistant: signals, knowledge base, open loops",
       "role": "personal-assistant"
     }

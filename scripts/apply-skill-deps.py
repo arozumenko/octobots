@@ -118,8 +118,9 @@ def main():
     skills_dir = Path(dest) / "skills"
     mcp_file = Path(".mcp.json")
 
-    if not skills_dir.is_dir():
-        print(f"  — {skills_dir} not found, skipping")
+    installed_skills_dir = Path(".claude/skills")
+    if not skills_dir.is_dir() and not installed_skills_dir.is_dir():
+        print(f"  — neither {skills_dir} nor {installed_skills_dir} found, skipping")
         return
 
     bak_file = mcp_file.with_suffix(".json.bak")

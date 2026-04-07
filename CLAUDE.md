@@ -51,10 +51,17 @@ Roles are standalone GitHub repos (`arozumenko/<name>-agent`). Each has:
 
 Install a role: `npx github:arozumenko/<name>-agent init --all`
 
-Role resolution order in `start.sh`:
+Role resolution order (both `start.sh` and `supervisor.py`):
 1. `.octobots/roles/<role>/` (project overrides)
-2. `.claude/agents/<role>/` (installed standalone agents)
-3. `octobots/roles/<role>/` (bundled fallback — currently empty)
+2. `.claude/agents/<role>/` (installed via `npx github:<repo> init`)
+
+`octobots/roles/` is no longer a role source. The supervisor reads from
+`.claude/agents/` directly — no promotion, no moving files out of user-owned
+directories. `/role add <id>` / `/role add owner/repo[@ref]` installs into
+`.claude/agents/` via `registry-fetch.sh` and then launches the worker in place.
+`/role remove` only tears down `.octobots/workers/<role>/` and leaves
+`.claude/agents/<role>/` intact — uninstall the agent separately if you want it
+gone.
 
 Roles with `workspace: clone` get isolated repo clones under `.octobots/workers/<role>/`.
 
@@ -116,6 +123,7 @@ Bundled skills in `skills/<name>/` are reusable capabilities symlinked into each
 
 Bundled skills (still in this repo):
 - `taskbox` — inter-role messaging relay
+- `memory` — per-role persistent memory; supervisor invokes `memory.py snapshot` at every role launch
 - `bugfix-workflow` — structured bug investigation
 - `implement-feature` — feature implementation workflow
 - `plan-feature` — feature planning workflow

@@ -48,9 +48,18 @@ if [[ "$MODE" == "personal-assistant" ]]; then
     mkdir -p "$RUNTIME/pa-inbox/processed"
     mkdir -p "$RUNTIME/persona"
 
-    # Copy persona templates if not already present
-    PA_PERSONA_SRC="$OCTOBOTS_DIR/roles/personal-assistant/persona"
-    if [[ -d "$PA_PERSONA_SRC" ]]; then
+    # Copy persona templates if not already present — look in the installed PA
+    # agent first, then fall back to any bundled copy under octobots/roles/.
+    PA_PERSONA_SRC=""
+    for candidate in \
+        "$PROJECT_DIR/.claude/agents/personal-assistant/persona" \
+        "$OCTOBOTS_DIR/roles/personal-assistant/persona"; do
+        if [[ -d "$candidate" ]]; then
+            PA_PERSONA_SRC="$candidate"
+            break
+        fi
+    done
+    if [[ -n "$PA_PERSONA_SRC" ]]; then
         for tmpl in USER.md TOOLS.md access-control.yaml; do
             if [[ ! -f "$RUNTIME/persona/$tmpl" ]]; then
                 cp "$PA_PERSONA_SRC/$tmpl" "$RUNTIME/persona/$tmpl"
@@ -112,8 +121,9 @@ EOF
     echo "  Created board.md"
 fi
 
-# ── Create memory files for base roles ──────────────────────────────────────
-for role_dir in "$OCTOBOTS_DIR/roles"/*/; do
+# ── Create memory files for installed roles ────────────────────────────────
+for role_dir in "$PROJECT_DIR/.claude/agents"/*/; do
+    [[ -f "$role_dir/AGENT.md" ]] || continue
     role="$(basename "$role_dir")"
     memory_file="$RUNTIME/memory/${role}.md"
     if [[ ! -f "$memory_file" ]]; then
@@ -236,8 +246,9 @@ if [[ -n "$ADHOC_SKILL" ]]; then
 fi
 
 # ── Seed .claude/ for Claude Code agent + skill discovery ───────────────────
-# .claude/agents/ and .claude/skills/ are symlinks into octobots — source of
-# truth stays in octobots/roles/, octobots/shared/agents/, octobots/skills/
+# .claude/agents/ and .claude/skills/ in each worker dir are symlinks to the
+# canonical install locations in the project root: .claude/agents/ (or
+# .octobots/roles/ for overrides) and .claude/skills/.
 #
 # seed_claude_dir <target_dir> [role]
 #   No role  → all roles + shared agents + all skills  (main project dir)
@@ -252,10 +263,11 @@ seed_claude_dir() {
     mkdir -p "$target_dir/.claude/agents" "$target_dir/.claude/skills"
 
     # Roles → .claude/agents/<role>  (all, or only the worker's own role)
-    # Source: installed agents in PROJECT_DIR/.claude/agents/ (canonical),
-    # then bundled fallback in octobots/roles/ (for any not yet installed).
+    # Sources: project overrides in .octobots/roles/ take priority over installed
+    # agents in .claude/agents/. The supervisor installs agents via `npx github:<repo> init`
+    # which writes to .claude/agents/, so that is the canonical install location.
     declare -A _seeded_roles
-    for src_dir in "$PROJECT_DIR/.claude/agents" "$OCTOBOTS_DIR/roles"; do
+    for src_dir in "$PROJECT_DIR/.octobots/roles" "$PROJECT_DIR/.claude/agents"; do
         [[ -d "$src_dir" ]] || continue
         # Skip if src == target agents dir (would create self-symlinks)
         [[ "$src_dir" == "$target_dir/.claude/agents" ]] && continue
@@ -285,8 +297,8 @@ seed_claude_dir() {
     # Skills — all skills for main project dir; role-filtered for workers
     local allowed_skills=()
     if [[ -n "$only_role" ]]; then
-        local agent_md="$PROJECT_DIR/.claude/agents/$only_role/AGENT.md"
-        [[ -f "$agent_md" ]] || agent_md="$OCTOBOTS_DIR/roles/$only_role/AGENT.md"
+        local agent_md="$PROJECT_DIR/.octobots/roles/$only_role/AGENT.md"
+        [[ -f "$agent_md" ]] || agent_md="$PROJECT_DIR/.claude/agents/$only_role/AGENT.md"
         if [[ -f "$agent_md" ]]; then
             # Parse: skills: [foo, bar, baz]  (single-line YAML array in frontmatter)
             local skills_line; skills_line=$(grep -m1 '^skills:' "$agent_md" 2>/dev/null || true)
@@ -315,13 +327,22 @@ seed_claude_dir() {
     done
 
     # Propagate skills installed via `npx skills add` in the project root's .claude/skills/
-    # (real directories, not symlinks from octobots) into this target's .claude/skills/
+    # (real directories, not symlinks from octobots) into this target's .claude/skills/.
+    # Apply the same per-role allowlist as bundled skills above — otherwise published
+    # skills leak into every worker regardless of what the role declared.
     if [[ "$target_dir" != "$PROJECT_DIR" && -d "$PROJECT_DIR/.claude/skills" ]]; then
         for skill_dir in "$PROJECT_DIR/.claude/skills"/*/; do
             [[ -d "$skill_dir" ]] || continue
             # Skip if it's already a symlink (came from octobots/skills/ above)
             [[ -L "$skill_dir" ]] && continue
             local skill; skill="$(basename "$skill_dir")"
+            if [[ ${#allowed_skills[@]} -gt 0 ]]; then
+                local found=0
+                for s in "${allowed_skills[@]}"; do
+                    [[ "$s" == "$skill" ]] && found=1 && break
+                done
+                [[ $found -eq 0 ]] && continue
+            fi
             local link="$target_dir/.claude/skills/$skill"
             [[ ! -e "$link" ]] && ln -sf "$skill_dir" "$link" && echo "  .claude/skills/$skill (installed)"
         done
@@ -340,9 +361,9 @@ seed_claude_dir "$PROJECT_DIR"
 generate_worker_claude() {
     local worker="$1"
     local worker_dir="$2"
-    # Find AGENT.md: installed agent takes priority over bundled role
-    local agent_md="$PROJECT_DIR/.claude/agents/$worker/AGENT.md"
-    [[ -f "$agent_md" ]] || agent_md="$OCTOBOTS_DIR/roles/$worker/AGENT.md"
+    # Find AGENT.md: project override takes priority over installed agent
+    local agent_md="$PROJECT_DIR/.octobots/roles/$worker/AGENT.md"
+    [[ -f "$agent_md" ]] || agent_md="$PROJECT_DIR/.claude/agents/$worker/AGENT.md"
 
     # Parse skills list from AGENT.md frontmatter: skills: [foo, bar]
     local skills_line; skills_line=$(grep -m1 '^skills:' "$agent_md" 2>/dev/null || true)
@@ -385,36 +406,25 @@ CEOF
 # All roles get a worker dir + .claude/ seeding.
 # Roles with `workspace: clone` in their AGENT.md also get isolated repo clones.
 
-# Discover all roles: installed agents (.claude/agents/) take priority,
-# bundled roles (octobots/roles/) used as fallback for any not yet installed.
+# Discover all roles from .claude/agents/ — the canonical install location.
+# Project overrides live in .octobots/roles/ and shadow installed agents of the
+# same name; we walk both and dedupe with .octobots/roles/ winning.
 ALL_WORKERS=()
 CLONE_WORKERS=()
 declare -A _seen_roles
 
-# 1. Installed agents (canonical source after decoupling)
-if [[ -d "$PROJECT_DIR/.claude/agents" ]]; then
-    for role_dir in "$PROJECT_DIR/.claude/agents"/*/; do
+for src_dir in "$PROJECT_DIR/.octobots/roles" "$PROJECT_DIR/.claude/agents"; do
+    [[ -d "$src_dir" ]] || continue
+    for role_dir in "$src_dir"/*/; do
         [[ -f "$role_dir/AGENT.md" ]] || continue
         role="$(basename "$role_dir")"
+        [[ -n "${_seen_roles[$role]:-}" ]] && continue
         _seen_roles[$role]=1
         ALL_WORKERS+=("$role")
         if grep -q "^workspace:[[:space:]]*clone" "$role_dir/AGENT.md" 2>/dev/null; then
             CLONE_WORKERS+=("$role")
         fi
     done
-fi
-
-# 2. Bundled fallback (octobots/roles/) for roles not yet installed
-for role_dir in "$OCTOBOTS_DIR/roles"/*/; do
-    [[ -d "$role_dir" ]] || continue
-    role="$(basename "$role_dir")"
-    [[ -n "${_seen_roles[$role]:-}" ]] && continue
-    [[ -f "$role_dir/AGENT.md" ]] || continue
-    _seen_roles[$role]=1
-    ALL_WORKERS+=("$role")
-    if grep -q "^workspace:[[:space:]]*clone" "$role_dir/AGENT.md" 2>/dev/null; then
-        CLONE_WORKERS+=("$role")
-    fi
 done
 
 echo ""

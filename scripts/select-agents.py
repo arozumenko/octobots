@@ -156,12 +156,13 @@ def main():
     else:
         selected_ids = run_interactive(registry)
 
-    # Resolve ids to repos and print
+    # Resolve ids to repo@ref and print (ref defaults to "main")
     print()
     for aid in selected_ids:
         agent = agents.get(aid)
         if agent:
-            print(agent["repo"])
+            ref = agent.get("ref", "main")
+            print(f"{agent['repo']}@{ref}")
 
 
 if __name__ == "__main__":

@@ -42,8 +42,8 @@ OCTOBOTS_DIR = SCRIPT_DIR.parent
 PROJECT_DIR = Path.cwd()
 RUNTIME_DIR = PROJECT_DIR / ".octobots"
 RELAY_SCRIPT = OCTOBOTS_DIR / "skills" / "taskbox" / "scripts" / "relay.py"
-BASE_ROLES = OCTOBOTS_DIR / "roles"
 LOCAL_ROLES = RUNTIME_DIR / "roles"
+INSTALLED_AGENTS = PROJECT_DIR / ".claude" / "agents"
 
 TMUX_SESSION = "octobots"
 EXCLUDED_ROLES = {"scout"}
@@ -452,12 +452,18 @@ class TmuxManager:
 # ── Role Resolution ─────────────────────────────────────────────────────────
 
 def resolve_role(role: str) -> Path | None:
+    """Resolve a role name to its AGENT.md directory.
+
+    Resolution order:
+      1. .octobots/roles/<role>/   (project overrides)
+      2. .claude/agents/<role>/    (installed via `npx github:<repo> init`)
+    """
     local = LOCAL_ROLES / role / "AGENT.md"
-    base = BASE_ROLES / role / "AGENT.md"
+    installed = INSTALLED_AGENTS / role / "AGENT.md"
     if local.is_file():
         return local.parent
-    if base.is_file():
-        return base.parent
+    if installed.is_file():
+        return installed.parent
     return None
 
 
@@ -470,7 +476,7 @@ def discover_workers() -> list[str]:
     seen: set[str] = set()
     workers: list[str] = []
 
-    for roles_dir in [LOCAL_ROLES, BASE_ROLES]:
+    for roles_dir in [LOCAL_ROLES, INSTALLED_AGENTS]:
         if not roles_dir.is_dir():
             continue
         for role_dir in sorted(roles_dir.iterdir()):
@@ -1061,57 +1067,70 @@ class Supervisor:
         console.print(f"[green]✓ {alias} (clone of {source_role}) launched[/green]")
 
     def _teardown_worker_env(self, role: str) -> None:
-        """Remove worker dir and undo promotion if the role was promoted from Claude."""
+        """Remove the worker's runtime dir. Leaves .claude/agents/<role>/ alone —
+        that is owned by the user / agent installer, not by the supervisor."""
         worker_dir = RUNTIME_DIR / "workers" / role
-        promoted = (worker_dir / ".promoted").is_file() if worker_dir.is_dir() else False
-
-        # Remove worker dir
         if worker_dir.is_dir():
             shutil.rmtree(worker_dir)
 
-        # If promoted: restore role dir back to .claude/agents/<role>/
-        role_dir = BASE_ROLES / role
-        agent_link = PROJECT_DIR / ".claude" / "agents" / role
-        if promoted and role_dir.is_dir():
-            if agent_link.is_symlink():
-                agent_link.unlink()
-            shutil.move(str(role_dir), str(agent_link))
-            console.print(f"[dim]  Restored {role} → .claude/agents/{role}/[/dim]")
+    def _role_add(self, arg: str) -> None:
+        """Add a role to the live team.
 
-    def _role_add(self, role: str) -> None:
-        # Detect GitHub repo format: owner/repo or owner/repo@ref
-        if "/" in role:
+        Accepts three input forms:
+          1. <agent-id>        — looked up in agents.json (repo + pinned ref)
+          2. <owner>/<repo>[@ref]  — installed directly via registry-fetch.sh
+          3. <role-name>       — already present under .claude/agents/ or .octobots/roles/
+
+        Form 1 and 2 both install into .claude/agents/<role>/ via `npx github:<repo> init`.
+        The supervisor never moves files out of .claude/agents/ — that directory is
+        owned by the user / agent installer, not by the supervisor.
+        """
+        role: str | None = None
+
+        # Form 2: owner/repo[@ref] — install directly
+        if "/" in arg:
             ref = "main"
-            repo = role
+            repo = arg
             if "@" in repo:
                 repo, ref = repo.rsplit("@", 1)
             console.print(f"[dim]Fetching role {repo}@{ref}...[/dim]")
-            installed_name = self._fetch_component("agent", repo, ref)
-            if not installed_name:
+            role = self._fetch_component("agent", repo, ref)
+            if not role:
                 return
-            role = installed_name
+        else:
+            # Form 3: already installed? use as-is.
+            if resolve_role(arg) is not None:
+                role = arg
+            else:
+                # Form 1: look up in agents.json registry
+                registry_path = OCTOBOTS_DIR / "agents.json"
+                entry = None
+                if registry_path.is_file():
+                    try:
+                        data = json.loads(registry_path.read_text())
+                        entry = next((a for a in data.get("agents", []) if a.get("id") == arg), None)
+                    except (json.JSONDecodeError, OSError) as e:
+                        console.print(f"[red]Could not read agents.json: {e}[/red]")
+                        return
+                if not entry:
+                    console.print(f"[red]Role '{arg}' not found in .octobots/roles/, .claude/agents/, or agents.json[/red]")
+                    console.print("[dim]Use `/role add owner/repo[@ref]` to install from a GitHub repo.[/dim]")
+                    return
+                repo = entry["repo"]
+                ref = entry.get("ref", "main")
+                console.print(f"[dim]Installing {arg} from {repo}@{ref}...[/dim]")
+                role = self._fetch_component("agent", repo, ref)
+                if not role:
+                    return
 
         if role in self.workers:
             console.print(f"[yellow]{role} is already running.[/yellow]")
             return
 
-        # Resolve source: octobots/roles/ or .claude/agents/ (real dir = Claude-created)
         role_dir = resolve_role(role)
-        promoted = False
-
         if role_dir is None:
-            agent_candidate = PROJECT_DIR / ".claude" / "agents" / role
-            if agent_candidate.is_dir() and not agent_candidate.is_symlink():
-                # Promote: move into octobots/roles/, replace with symlink
-                dest = BASE_ROLES / role
-                shutil.move(str(agent_candidate), str(dest))
-                agent_candidate.symlink_to(dest)
-                role_dir = dest
-                promoted = True
-                console.print(f"[cyan]↑ Promoted .claude/agents/{role}/ → octobots/roles/{role}/[/cyan]")
-            else:
-                console.print(f"[red]Role '{role}' not found in octobots/roles/ or .claude/agents/[/red]")
-                return
+            console.print(f"[red]Install reported success but {role} is not discoverable. Check .claude/agents/{role}/AGENT.md[/red]")
+            return
 
         # Warn if AGENT.md is missing octobots conventions
         agent_md = role_dir / "AGENT.md"
@@ -1128,10 +1147,6 @@ class Supervisor:
 
         # Set up worker environment
         self._setup_worker_env(role)
-
-        # Mark as promoted so teardown can undo it
-        if promoted:
-            (RUNTIME_DIR / "workers" / role / ".promoted").touch()
 
         # Add live tmux pane
         pane = self.tmux.add_pane(role)
@@ -1179,10 +1194,10 @@ class Supervisor:
             seen: set[str] = set()
             rows: list[tuple[str, str, bool]] = []
 
-            # octobots/roles/
-            for d in sorted(BASE_ROLES.iterdir()) if BASE_ROLES.is_dir() else []:
-                if d.is_dir() and (d / "AGENT.md").is_file():
-                    rows.append((d.name, "octobots/roles/", d.name in self.workers))
+            # .claude/agents/ (installed via npx github:<repo> init)
+            for d in sorted(INSTALLED_AGENTS.iterdir()) if INSTALLED_AGENTS.is_dir() else []:
+                if (d.is_dir() or d.is_symlink()) and (d / "AGENT.md").is_file():
+                    rows.append((d.name, ".claude/agents/", d.name in self.workers))
                     seen.add(d.name)
 
             # .octobots/roles/ (local overrides)
@@ -1190,14 +1205,6 @@ class Supervisor:
                 if d.is_dir() and (d / "AGENT.md").is_file() and d.name not in seen:
                     rows.append((d.name, ".octobots/roles/", d.name in self.workers))
                     seen.add(d.name)
-
-            # .claude/agents/ — real dirs (Claude-created, not yet promoted)
-            agents_dir = PROJECT_DIR / ".claude" / "agents"
-            if agents_dir.is_dir():
-                for d in sorted(agents_dir.iterdir()):
-                    if d.is_dir() and not d.is_symlink() and d.name not in seen:
-                        rows.append((d.name, ".claude/agents/ (promotable)", d.name in self.workers))
-                        seen.add(d.name)
 
             for name, source, active in rows:
                 clone_of = self._role_source.get(name)
@@ -2028,7 +2035,7 @@ class Supervisor:
                 console.print(f"[green]✓ {r}: linked .claude/skills/{skill}[/green]")
 
             # 2. Update skills: list in AGENT.md frontmatter
-            for base in (BASE_ROLES, LOCAL_ROLES):
+            for base in (LOCAL_ROLES, INSTALLED_AGENTS):
                 agent_md = base / r / "AGENT.md"
                 if not agent_md.is_file():
                     continue
@@ -2427,7 +2434,7 @@ class Supervisor:
             ("/skill <role|all> <skill>", "Link installed skill to a worker (update AGENT.md)"),
             ("/role list", "Show all available roles and which are active"),
             ("/role add <name|owner/repo[@ref]>", "Add role live; fetches from GitHub if repo given"),
-            ("/role remove <name>", "Stop role, remove workspace, demote if promoted"),
+            ("/role remove <name>", "Stop role and remove its .octobots/workers/ dir (leaves .claude/agents/ intact)"),
             ("/role clone <source> [alias]", "Spawn a clone with its own isolated workspace"),
             ("/clear <role>", "Send /clear to a worker"),
             ("/tasks [clean|abandon]", "List active tasks; clean requeues processing; abandon drops all"),
@@ -2595,7 +2602,7 @@ def main() -> None:
     if args.workers is None:
         workers = discover_workers()
         if not workers:
-            console.print("[red]No workers found. Check octobots/roles/ or .octobots/roles/[/red]")
+            console.print("[red]No workers found. Check .claude/agents/ or .octobots/roles/[/red]")
             console.print("[dim]Tip: re-run with --workers (no args) to start empty and add roles via /role add.[/dim]")
             sys.exit(1)
     else:

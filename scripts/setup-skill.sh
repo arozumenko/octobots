@@ -65,8 +65,8 @@ find_skill_dir() {
 # resolve_skills_for_role <role> → prints skill names, one per line
 resolve_skills_for_role() {
     local role="$1"
-    local agent_md="$PROJECT_DIR/.claude/agents/$role/AGENT.md"
-    [[ -f "$agent_md" ]] || agent_md="$OCTOBOTS_DIR/roles/$role/AGENT.md"
+    local agent_md="$PROJECT_DIR/.octobots/roles/$role/AGENT.md"
+    [[ -f "$agent_md" ]] || agent_md="$PROJECT_DIR/.claude/agents/$role/AGENT.md"
     if [[ ! -f "$agent_md" ]]; then
         echo "  [setup-skill] role '$role' not found" >&2
         return 1

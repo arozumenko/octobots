@@ -1,42 +1,84 @@
 {
-  "_comment": "Octobots skill registry. Add entries here to make published skills installable during setup. Used by install.sh.",
+  "_comment": "Octobots skill registry. Each entry maps a skill id to a published GitHub repo and a pinned ref (commit SHA, tag, or branch). install.sh uses this to resolve the skills declared in installed agents' `skills:` frontmatter. The install set is driven by agent declarations, not by a global default list — users get exactly what their team needs.",
 
   "skills": [
     {
       "id": "browser-verify",
-      "repo": "arozumenko/browser-verify",
-      "description": "Browser verification via CDP — visual checks, screenshots, accessibility",
-      "default": true
+      "repo": "arozumenko/skill-browser-verify",
+      "ref": "main",
+      "description": "Browser verification via CDP — visual checks, screenshots, accessibility"
     },
     {
       "id": "tdd",
       "repo": "arozumenko/skill-tdd",
-      "description": "Test-driven development workflow — red/green/refactor cycle",
-      "default": true
+      "ref": "main",
+      "description": "Test-driven development workflow — red/green/refactor cycle"
     },
     {
       "id": "code-review",
       "repo": "arozumenko/skill-code-review",
-      "description": "Structured code review — security, quality, conventions",
-      "default": true
+      "ref": "main",
+      "description": "Structured code review — security, quality, conventions"
     },
     {
       "id": "git-workflow",
       "repo": "arozumenko/skill-git-workflow",
-      "description": "Git branching, PR creation, and merge workflow",
-      "default": true
+      "ref": "main",
+      "description": "Git branching, PR creation, and merge workflow"
     },
     {
       "id": "issue-tracking",
       "repo": "arozumenko/skill-issue-tracking",
-      "description": "GitHub issue lifecycle — labelling, commenting, closing",
-      "default": true
+      "ref": "main",
+      "description": "GitHub issue lifecycle — labelling, commenting, closing"
     },
     {
       "id": "playwright-testing",
       "repo": "arozumenko/skill-playwright-testing",
-      "description": "End-to-end browser testing with Playwright",
-      "default": true
+      "ref": "main",
+      "description": "End-to-end browser testing with Playwright"
+    },
+    {
+      "id": "bugfix-workflow",
+      "repo": "arozumenko/skill-bugfix-workflow",
+      "ref": "main",
+      "description": "End-to-end bugfix workflow — reproduce, test, fix, verify, document"
+    },
+    {
+      "id": "implement-feature",
+      "repo": "arozumenko/skill-implement-feature",
+      "ref": "main",
+      "description": "End-to-end feature implementation workflow — plan, test, build, ship"
+    },
+    {
+      "id": "plan-feature",
+      "repo": "arozumenko/skill-plan-feature",
+      "ref": "main",
+      "description": "Structured feature planning — requirements, feasibility, acceptance criteria"
+    },
+    {
+      "id": "project-seeder",
+      "repo": "arozumenko/skill-project-seeder",
+      "ref": "main",
+      "description": "Generate AGENTS.md and .octobots/ config for a new project (used by scout)"
+    },
+    {
+      "id": "deep-research",
+      "repo": "arozumenko/skill-deep-research",
+      "ref": "main",
+      "description": "Deep research workflow — trends, topic analysis, fact-checking"
+    },
+    {
+      "id": "context-gatherer",
+      "repo": "arozumenko/skill-context-gatherer",
+      "ref": "main",
+      "description": "Cross-channel context gathering — email, Teams, local KB"
+    },
+    {
+      "id": "goal-verifier",
+      "repo": "arozumenko/skill-goal-verifier",
+      "ref": "main",
+      "description": "Goal-backward verification — check outcomes, not task completion"
     }
   ]
 }

@@ -3,7 +3,7 @@
 #
 # Resolution order:
 #   1. .octobots/roles/<role>/   (project overrides)
-#   2. octobots/roles/<role>/    (base framework)
+#   2. .claude/agents/<role>/    (installed via npx github:arozumenko/<role>-agent init)
 #
 # Usage:
 #   octobots/start.sh <role>           # e.g. python-dev, js-dev
@@ -23,8 +23,8 @@ done
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(pwd)"
-BASE_ROLES="$SCRIPT_DIR/roles"
 LOCAL_ROLES="$PROJECT_DIR/.octobots/roles"
+INSTALLED_AGENTS="$PROJECT_DIR/.claude/agents"
 
 # ── Load .env.octobots ──────────────────────────────────────────────────────
 # Mirrors supervisor.py load_env(): pulls KEY=VALUE pairs into the env so
@@ -72,15 +72,12 @@ esac
 # Resolution order:
 #   1. .octobots/roles/<role>/      project overrides
 #   2. .claude/agents/<role>/       installed via npx github:arozumenko/<role>-agent init
-#   3. octobots/roles/<role>/       bundled fallback
 resolve_role() {
     local role="$1"
     if [[ -f "$LOCAL_ROLES/$role/AGENT.md" ]]; then
         echo "$LOCAL_ROLES/$role"
-    elif [[ -f "$PROJECT_DIR/.claude/agents/$role/AGENT.md" ]]; then
-        echo "$PROJECT_DIR/.claude/agents/$role"
-    elif [[ -f "$BASE_ROLES/$role/AGENT.md" ]]; then
-        echo "$BASE_ROLES/$role"
+    elif [[ -f "$INSTALLED_AGENTS/$role/AGENT.md" ]]; then
+        echo "$INSTALLED_AGENTS/$role"
     else
         echo ""
     fi
@@ -111,7 +108,7 @@ register_agent() {
 if [[ "${1:-}" == "--list" ]]; then
     echo "Available roles:"
     declare -A seen
-    for roles_dir in "$LOCAL_ROLES" "$BASE_ROLES"; do
+    for roles_dir in "$LOCAL_ROLES" "$INSTALLED_AGENTS"; do
         [[ -d "$roles_dir" ]] || continue
         for role_dir in "$roles_dir"/*/; do
             [[ -d "$role_dir" ]] || continue
@@ -137,7 +134,7 @@ ROLE_DIR=$(resolve_role "$ROLE")
 
 if [[ -z "$ROLE_DIR" ]]; then
     echo "Error: role '$ROLE' not found." >&2
-    echo "Checked: $LOCAL_ROLES/$ROLE/ and $BASE_ROLES/$ROLE/" >&2
+    echo "Checked: $LOCAL_ROLES/$ROLE/ and $INSTALLED_AGENTS/$ROLE/" >&2
     echo "Run 'octobots/start.sh --list' to see available roles." >&2
     exit 1
 fi
