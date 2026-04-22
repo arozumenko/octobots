@@ -1,5 +1,5 @@
 {
-  "_comment": "Octobots skill registry. All published skills now live in the arozumenko/sdlc-skills monorepo. install.sh resolves the union of `skills:` declared by installed agents and installs them in one batched call to the sdlc-skills installer (see install.sh). This file is kept for documentation and so third-party tools can map skill ids back to the monorepo.",
+  "_comment": "Octobots skill registry. Most published skills live in the arozumenko/sdlc-skills monorepo and are installed in one batched call by install.sh. Third-party skill repos carry `repo: owner/repo` (+ optional `ref`) and are fetched individually via registry-fetch.sh. install.sh consults this file to split the union of declared skills between the two paths.",
 
   "monorepo": {
     "id": "sdlc-skills",
@@ -23,6 +23,11 @@
     {"id": "goal-verifier",      "monorepo": "sdlc-skills", "name": "goal-verifier",      "description": "Goal-backward verification — check outcomes, not task completion"},
     {"id": "memory",             "monorepo": "sdlc-skills", "name": "memory",             "description": "Persistent file-based memory across conversations"},
     {"id": "obsidian-vault",     "monorepo": "sdlc-skills", "name": "obsidian-vault",     "description": "Read/write the user's Obsidian second brain"},
-    {"id": "msgraph",            "monorepo": "sdlc-skills", "name": "msgraph",            "description": "Microsoft Graph (email/calendar/Teams) integration"}
+    {"id": "msgraph",            "monorepo": "sdlc-skills", "name": "msgraph",            "description": "Microsoft Graph (email/calendar/Teams) integration"},
+
+    {"id": "swiftui-pro",           "repo": "twostraws/SwiftUI-Agent-Skill",           "ref": "main", "description": "SwiftUI code review and authoring — modern APIs, performance, accessibility (by Paul Hudson)"},
+    {"id": "swiftdata-pro",         "repo": "twostraws/SwiftData-Agent-Skill",         "ref": "main", "description": "SwiftData code review and authoring — modern APIs, CloudKit compatibility (by Paul Hudson)"},
+    {"id": "swift-testing-pro",     "repo": "twostraws/Swift-Testing-Agent-Skill",     "ref": "main", "description": "Swift Testing code review and authoring — modern APIs (by Paul Hudson)"},
+    {"id": "swift-concurrency-pro", "repo": "twostraws/Swift-Concurrency-Agent-Skill", "ref": "main", "description": "Swift concurrency code review and authoring — actors, async/await, structured concurrency (by Paul Hudson)"}
   ]
 }

@@ -38,6 +38,13 @@
       "role": "js-dev"
     },
     {
+      "id": "ios-dev",
+      "monorepo": "sdlc-skills",
+      "name": "ios-dev",
+      "description": "Io — iOS/Swift developer (SwiftUI, SwiftData, Swift Testing)",
+      "role": "ios-dev"
+    },
+    {
       "id": "ba",
       "monorepo": "sdlc-skills",
       "name": "ba",

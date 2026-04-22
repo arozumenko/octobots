@@ -163,9 +163,10 @@ fi
 
 # ── Install skills declared by selected agents ───────────────────────────────
 # Source of truth: the union of `skills:` frontmatter from every installed agent.
-# We then intersect with skills.json to map skill id → published repo, and
-# install only that subset. This replaces the old "default: true everywhere"
-# logic so users get exactly what their selected team needs — nothing more.
+# Each declared id is looked up in skills.json:
+#   monorepo: sdlc-skills  → batched into one sdlc-skills installer call
+#   repo: owner/repo       → fetched individually via registry-fetch.sh
+#   not listed             → warned and skipped
 
 echo ""
 echo "Installing skills required by your team..."
@@ -175,24 +176,59 @@ if command -v npx &>/dev/null; then
     if [[ -z "$REQUIRED_SKILLS" ]]; then
         echo "  — no skills declared by selected agents"
     else
-        # Filter out skills already present (bundled or pre-installed) and
-        # batch the rest into a single sdlc-skills installer call.
-        TO_INSTALL=""
+        SDLC_SKILL_NAMES=""
         while IFS= read -r skill_id; do
             [[ -z "$skill_id" ]] && continue
             if [[ -d ".claude/skills/$skill_id" ]]; then
                 echo "  ✓ $skill_id (already present)"
                 continue
             fi
-            TO_INSTALL="${TO_INSTALL:+$TO_INSTALL,}$skill_id"
+            # Resolve skill_id against skills.json → "monorepo" | "<owner/repo>[@ref]" | "unknown"
+            resolution=$(python3 - "$DEST/skills.json" "$skill_id" <<'PY'
+import json, sys
+registry, skill_id = sys.argv[1], sys.argv[2]
+try:
+    data = json.load(open(registry))
+except Exception:
+    print("unknown"); sys.exit(0)
+for entry in data.get("skills", []):
+    if entry.get("id") != skill_id:
+        continue
+    if entry.get("monorepo"):
+        print("monorepo"); sys.exit(0)
+    repo = entry.get("repo")
+    if repo:
+        ref = entry.get("ref", "main")
+        print(f"{repo}@{ref}"); sys.exit(0)
+    break
+print("unknown")
+PY
+)
+            case "$resolution" in
+                monorepo)
+                    SDLC_SKILL_NAMES="${SDLC_SKILL_NAMES:+$SDLC_SKILL_NAMES,}$skill_id"
+                    ;;
+                unknown)
+                    echo "  ⚠  $skill_id — not in skills.json, skipping"
+                    ;;
+                *)
+                    repo="${resolution%@*}"
+                    ref="${resolution##*@}"
+                    if bash "$DEST/scripts/registry-fetch.sh" skill "$repo" "$ref" >/dev/null; then
+                        echo "  ✓ $skill_id (from $repo@$ref)"
+                    else
+                        echo "  ⚠  $skill_id — fetch failed from $repo@$ref"
+                    fi
+                    ;;
+            esac
         done <<< "$REQUIRED_SKILLS"
 
-        if [[ -n "$TO_INSTALL" ]]; then
+        if [[ -n "$SDLC_SKILL_NAMES" ]]; then
             if npx -y github:arozumenko/sdlc-skills init \
-                --skills "$TO_INSTALL" --target claude --yes 2>&1 | sed 's/^/    /'; then
-                echo "  ✓ sdlc-skills: $TO_INSTALL"
+                --skills "$SDLC_SKILL_NAMES" --target claude --yes 2>&1 | sed 's/^/    /'; then
+                echo "  ✓ sdlc-skills: $SDLC_SKILL_NAMES"
             else
-                echo "  ⚠  sdlc-skills skill install failed ($TO_INSTALL)"
+                echo "  ⚠  sdlc-skills skill install failed ($SDLC_SKILL_NAMES)"
             fi
         fi
     fi
