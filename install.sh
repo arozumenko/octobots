@@ -105,10 +105,29 @@ cp -r "$SRC" "./$DEST"
 
 echo ""
 echo "Installing Python dependencies..."
-if command -v pip3 &>/dev/null; then
-    pip3 install -q -r "$DEST/scripts/requirements.txt"
+REQS="$DEST/scripts/requirements.txt"
+PIP_ERR="$TMP_DIR/pip-err.txt"
+if [[ -d "venv" ]]; then
+    echo "  Using existing venv/"
+    venv/bin/pip install -q -r "$REQS"
+elif [[ -d ".venv" ]]; then
+    echo "  Using existing .venv/"
+    .venv/bin/pip install -q -r "$REQS"
+elif command -v pip3 &>/dev/null; then
+    if pip3 install -q -r "$REQS" 2>"$PIP_ERR"; then
+        echo "  ✓ Dependencies installed"
+    elif grep -q "externally-managed-environment" "$PIP_ERR" 2>/dev/null; then
+        echo "  System Python is externally managed (PEP 668) — creating venv/"
+        python3 -m venv venv
+        venv/bin/pip install -q -r "$REQS"
+        echo "  ✓ Dependencies installed in venv/"
+        echo "  NOTE: Run scripts via 'venv/bin/python3' or 'source venv/bin/activate'"
+    else
+        echo "  ⚠  pip install failed:"
+        cat "$PIP_ERR"
+    fi
 elif command -v pip &>/dev/null; then
-    pip install -q -r "$DEST/scripts/requirements.txt"
+    pip install -q -r "$REQS" || echo "  ⚠  pip install failed"
 else
     echo "  ⚠  pip not found — run: pip install -r octobots/scripts/requirements.txt"
 fi
@@ -211,6 +230,31 @@ fi
 echo ""
 echo "Configuring skill dependencies..."
 DEST="$DEST" python3 "$DEST/scripts/apply-skill-deps.py"
+
+# ── Ensure notify MCP server is configured ───────────────────────────────────
+
+echo ""
+echo "Configuring notify MCP server..."
+python3 -c "
+import json, sys
+mcp_file = '.mcp.json'
+try:
+    with open(mcp_file) as f:
+        cfg = json.load(f)
+except (FileNotFoundError, json.JSONDecodeError):
+    cfg = {}
+cfg.setdefault('mcpServers', {})
+if 'notify' not in cfg['mcpServers']:
+    cfg['mcpServers']['notify'] = {
+        'command': 'python3',
+        'args': ['octobots/mcp/notify/server.py']
+    }
+    with open(mcp_file, 'w') as f:
+        json.dump(cfg, f, indent=2)
+    print('  + MCP: notify (Telegram notifications)')
+else:
+    print('  - MCP: notify (already configured)')
+"
 
 # ── Initialize runtime ────────────────────────────────────────────────────────
 

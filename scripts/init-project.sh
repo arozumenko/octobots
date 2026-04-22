@@ -263,7 +263,7 @@ seed_claude_dir() {
     # Sources: project overrides in .octobots/roles/ take priority over installed
     # agents in .claude/agents/. The supervisor installs agents via `npx github:<repo> init`
     # which writes to .claude/agents/, so that is the canonical install location.
-    declare -A _seeded_roles
+    local _seeded_roles=""
     for src_dir in "$PROJECT_DIR/.octobots/roles" "$PROJECT_DIR/.claude/agents"; do
         [[ -d "$src_dir" ]] || continue
         # Skip if src == target agents dir (would create self-symlinks)
@@ -271,14 +271,14 @@ seed_claude_dir() {
         for role_dir in "$src_dir"/*/; do
             [[ -f "$role_dir/AGENT.md" ]] || continue
             local role; role="$(basename "$role_dir")"
-            [[ -n "${_seeded_roles[$role]:-}" ]] && continue
+            case ",$_seeded_roles," in *",$role,"*) continue ;; esac
             [[ -n "$only_role" && "$role" != "$only_role" ]] && continue
             local link="$target_dir/.claude/agents/$role"
             if [[ ! -e "$link" ]]; then
                 ln -sf "$role_dir" "$link"
                 echo "  .claude/agents/$role"
             fi
-            _seeded_roles[$role]=1
+            _seeded_roles="${_seeded_roles:+$_seeded_roles,}$role"
         done
     done
 
@@ -413,6 +413,26 @@ Rules:
 - First positional arg = message/caption. Optional: \`--file <path>\` to attach.
 - Messages longer than 4000 chars without \`--file\` are auto-uploaded as .md.
 - If Telegram is not configured the script exits 0 with \`{"status":"skipped"}\` — safe to ignore.
+
+## Delegating work to other roles
+
+**NEVER use the Claude Code Agent tool to do another role's work.**
+
+You have access to other agents in .claude/agents/, but those are for
+lightweight sub-tasks within YOUR own context (e.g., taskbox-listener for inbox
+polling, issue-reproducer for bug repro). They are NOT a substitute for
+sending work through taskbox to the actual role running in its own tmux pane.
+
+**To assign work to another role, use taskbox:**
+\`\`\`bash
+python octobots/skills/taskbox/scripts/relay.py send --from $worker --to <role> "TASK-NNN (#issue): description"
+\`\`\`
+
+The supervisor routes the message to the recipient's tmux pane. The recipient
+works in their own isolated context with their own skills, tools, and memory.
+
+**Wrong:** Using the Agent tool to spawn python-dev and write code in PM's context.
+**Right:** Sending a taskbox message to python-dev, who works in their own worktree.
 OEOF
 
     # CLAUDE.md — only written once (user may customize it; OCTOBOTS.md is always regenerated)
@@ -437,15 +457,15 @@ CEOF
 # same name; we walk both and dedupe with .octobots/roles/ winning.
 ALL_WORKERS=()
 CLONE_WORKERS=()
-declare -A _seen_roles
+_seen_roles=""
 
 for src_dir in "$PROJECT_DIR/.octobots/roles" "$PROJECT_DIR/.claude/agents"; do
     [[ -d "$src_dir" ]] || continue
     for role_dir in "$src_dir"/*/; do
         [[ -f "$role_dir/AGENT.md" ]] || continue
         role="$(basename "$role_dir")"
-        [[ -n "${_seen_roles[$role]:-}" ]] && continue
-        _seen_roles[$role]=1
+        case ",$_seen_roles," in *",$role,"*) continue ;; esac
+        _seen_roles="${_seen_roles:+$_seen_roles,}$role"
         ALL_WORKERS+=("$role")
         if grep -q "^workspace:[[:space:]]*clone" "$role_dir/AGENT.md" 2>/dev/null; then
             CLONE_WORKERS+=("$role")

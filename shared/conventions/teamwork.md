@@ -78,6 +78,25 @@ If you can't respond immediately (busy with another task), at least ack with: "R
 
 **Silence breaks the pipeline.** The sender doesn't know if you received the message, if you're working on it, or if you're stuck. Always respond.
 
+## Agent Tool vs Taskbox
+
+The Agent tool spawns sub-agents in YOUR context window. Taskbox sends messages to
+other roles running in their OWN tmux panes with their OWN context.
+
+**Use the Agent tool for:**
+- Lightweight sub-tasks that belong to YOUR role (taskbox-listener, issue-reproducer, rca-investigator)
+- Tasks that need YOUR context (reading files you already loaded, analyzing something you're looking at)
+
+**Use taskbox for:**
+- All work that belongs to another role (coding, testing, analysis, decomposition)
+- Anything that should happen in another role's isolated workspace
+- Task assignments, handoffs, status requests
+
+**NEVER use the Agent tool to do another role's job.** The Agent tool does not have access
+to the other role's worktree, memory, skills, or MCP servers. Work done via Agent
+runs in your context, consumes your context window, and produces results that
+are invisible to the role that should own them.
+
 ## Handoff Protocol
 
 When passing work to another role:

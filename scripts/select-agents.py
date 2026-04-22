@@ -42,7 +42,9 @@ def agents_by_id(registry):
 
 def prompt(msg, default=""):
     try:
-        val = input(msg)
+        sys.stderr.write(msg)
+        sys.stderr.flush()
+        val = input()
         return val.strip() or default
     except (EOFError, KeyboardInterrupt):
         return default
@@ -50,15 +52,15 @@ def prompt(msg, default=""):
 
 def select_qa(qa_agents, current=None):
     """Let user pick a QA agent (or none). Returns agent id or None."""
-    print("\n  ── QA Agent ──────────────────────────────────────────────")
+    print("\n  ── QA Agent ──────────────────────────────────────────────", file=sys.stderr)
     default_idx = 1
     for i, a in enumerate(qa_agents, 1):
         mark = " (default)" if a["id"] == current else ""
         if a["id"] == current:
             default_idx = i
-        print(f"    {i}. {a['description']}{mark}")
-    print("    s. Skip QA for now")
-    print()
+        print(f"    {i}. {a['description']}{mark}", file=sys.stderr)
+    print("    s. Skip QA for now", file=sys.stderr)
+    print(file=sys.stderr)
     choice = prompt(f"  Choose QA agent [{default_idx}]: ", str(default_idx))
     if choice.lower() == "s":
         return None
@@ -75,11 +77,11 @@ def select_devs(devs):
     """Multi-select devs. Returns list of agent ids."""
     if not devs:
         return []
-    print("\n  ── Developers ────────────────────────────────────────────")
+    print("\n  ── Developers ────────────────────────────────────────────", file=sys.stderr)
     for i, a in enumerate(devs, 1):
-        print(f"    {i}. {a['description']}")
-    print("    Enter comma-separated numbers, 'all', or blank to skip.")
-    print()
+        print(f"    {i}. {a['description']}", file=sys.stderr)
+    print("    Enter comma-separated numbers, 'all', or blank to skip.", file=sys.stderr)
+    print(file=sys.stderr)
     choice = prompt("  Pick devs [1]: ", "1")
     if not choice or choice.lower() in {"none", "skip", "s"}:
         return []
@@ -116,10 +118,10 @@ def run_custom(registry):
 
     for a in required:
         selected.append(a["id"])
-        print(f"    + {a['description']} (required)")
+        print(f"    + {a['description']} (required)", file=sys.stderr)
 
     if core:
-        print("\n  ── Core roles ────────────────────────────────────────────")
+        print("\n  ── Core roles ────────────────────────────────────────────", file=sys.stderr)
         for a in core:
             ans = prompt(f"    Include {a['description']}? [Y/n]: ", "y")
             if ans.lower() not in {"n", "no"}:
@@ -138,17 +140,17 @@ def run_custom(registry):
 def run_interactive(registry):
     presets = registry.get("presets", [])
 
-    print()
-    print("  ── Team Setup ────────────────────────────────────────────")
-    print()
+    print(file=sys.stderr)
+    print("  ── Team Setup ────────────────────────────────────────────", file=sys.stderr)
+    print(file=sys.stderr)
     agents = agents_by_id(registry)
     for i, p in enumerate(presets, 1):
-        print(f"    {i}. {p['name']}")
-        print(f"       {p['description']}")
+        print(f"    {i}. {p['name']}", file=sys.stderr)
+        print(f"       {p['description']}", file=sys.stderr)
         if p.get("qa"):
             qa = agents.get(p["qa"], {})
-            print(f"       QA: {qa.get('description', p['qa'])}")
-        print()
+            print(f"       QA: {qa.get('description', p['qa'])}", file=sys.stderr)
+        print(file=sys.stderr)
 
     choice = prompt("  Choose preset [1]: ", "1")
     try:
@@ -229,7 +231,7 @@ def main():
     # Resolve ids to either "sdlc:<name>" (monorepo entries) or "owner/repo@ref"
     # (third-party entries). install.sh batches the sdlc: ones into a single
     # `npx github:arozumenko/sdlc-skills init --agents a,b,c` call.
-    print()
+    print(file=sys.stderr)
     for aid in selected_ids:
         agent = agents.get(aid)
         if not agent:
