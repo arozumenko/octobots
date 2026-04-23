@@ -75,6 +75,9 @@ node_modules/
 .env.*
 .mcp.json
 
+# ── Handoff (contains tokens/paths) ─────────────────────────────────────────
+handoff-before-clear.md
+
 # ── OS ──────────────────────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
