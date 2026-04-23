@@ -60,9 +60,12 @@ console = Console()
 
 # ── Dispatch rules ──────────────────────────────────────────────────────────
 
-# Default rules block for dev-workflow roles (GitHub issues + shell relay).
-# Supports {msg_id} and {octobots_dir} placeholders.
-DEFAULT_DISPATCH_RULES = (
+# Bundled default rules file — dev-workflow roles (GitHub issues + shell relay).
+_DEFAULT_RULES_PATH = OCTOBOTS_DIR / "shared" / "default_rules.md"
+
+# Hardcoded fallback used when the bundled file is missing (preserves backward
+# compat in environments where shared/ is absent).
+_HARDCODED_FALLBACK = (
     "-- RULES: You MUST respond to this message. "
     "If it is a task: do the work, then 1) comment on the GitHub issue, "
     "2) run: python3 {octobots_dir}/skills/taskbox/scripts/relay.py ack {msg_id} \"your summary\", "
@@ -73,15 +76,30 @@ DEFAULT_DISPATCH_RULES = (
 )
 
 
+def _load_default_rules() -> str:
+    """Return bundled default_rules.md content, or the hardcoded fallback."""
+    try:
+        content = _DEFAULT_RULES_PATH.read_text(encoding="utf-8", errors="replace").strip()
+        if content:
+            return content
+    except OSError:
+        pass
+    return _HARDCODED_FALLBACK
+
+
+DEFAULT_DISPATCH_RULES = _load_default_rules()
+
+
 def render_dispatch_rules(
-    role_frontmatter: dict,
+    custom_rules: str | None,
     msg_id: str,
     octobots_dir: str | Path,
 ) -> str:
     """Return the RULES block for a dispatched message.
 
-    If the role's frontmatter contains a non-empty ``dispatch_rules`` string,
-    that string is used.  Otherwise ``DEFAULT_DISPATCH_RULES`` is used.
+    ``custom_rules`` is the content of the role's ``RULES.md`` file (read by
+    ``get_dispatch_rules`` in ``agent_registry.py``).  When it is None or
+    blank the bundled ``DEFAULT_DISPATCH_RULES`` is used instead.
 
     Supported placeholders (resolved via ``str.format_map``):
       - ``{msg_id}``       — the Taskbox message id
@@ -92,8 +110,7 @@ def render_dispatch_rules(
     """
     from collections import defaultdict
 
-    custom = (role_frontmatter.get("dispatch_rules") or "").strip()
-    template = custom if custom else DEFAULT_DISPATCH_RULES
+    template = (custom_rules or "").strip() or DEFAULT_DISPATCH_RULES
 
     subs: dict = defaultdict(str, msg_id=str(msg_id), octobots_dir=str(octobots_dir))
     return template.format_map(subs)
@@ -1291,8 +1308,8 @@ class Supervisor:
             return
 
         # Build single-line task prompt
-        role_fm = get_dispatch_rules(role)
-        rules_block = render_dispatch_rules(role_fm, msg_id, OCTOBOTS_DIR)
+        custom_rules = get_dispatch_rules(role)
+        rules_block = render_dispatch_rules(custom_rules, msg_id, OCTOBOTS_DIR)
 
         prompt = f"Message from {sender}: {content} {rules_block}"
         self.tmux.send_keys(pane, prompt, confirm_paste=True)

@@ -85,27 +85,42 @@ block that tells the agent what to do after completing the work.  By default
 the block assumes a dev-workflow role: comment on the GitHub issue, ack via
 `relay.py`, notify via MCP.
 
-Worker-style roles (no shell access, no GitHub issues, ack via MCP tool) can
-override this by adding a `dispatch_rules:` field to their `AGENT.md`
-frontmatter:
+### RULES.md file
 
-```yaml
----
-name: vision-analyst
-description: >-
-  Analyze meal photos and submit nutritional data.
-dispatch_rules: |
-  Analyze the meal photo per the meal-analysis skill and call
-  submit_meal_analysis with your results. Optionally call notify() when done.
-  Ack is handled internally by submit_meal_analysis — you do not need to call
-  relay.py.
----
+Each agent directory can contain a `RULES.md` file alongside `AGENT.md`:
+
 ```
+.claude/agents/<role>/
+├── AGENT.md       ← frontmatter: name, description, tools, theme …
+├── SOUL.md        ← optional personality/voice
+└── RULES.md       ← NEW: rules appended to every dispatched message
+```
+
+Worker-style roles (no shell access, no GitHub issues, ack via MCP tool)
+create a `RULES.md` to replace the default dev-workflow block:
+
+```
+RULES: You MUST respond to this message.
+
+Analyze the meal photo per the meal-analysis skill and call
+submit_meal_analysis with your results. Optionally call notify() when done.
+Ack is handled internally by submit_meal_analysis — you do not need to call
+relay.py.
+```
+
+### Resolution order
+
+The supervisor looks for `RULES.md` in this order:
+
+1. `.octobots/roles/<role>/RULES.md` — project-local override (beats installed)
+2. `.claude/agents/<role>/RULES.md` — installed agent default
+3. `shared/default_rules.md` in the octobots repo — bundled fallback
+4. Hardcoded string — last-resort fallback when the bundled file is absent
 
 ### Placeholder substitution
 
-The value of `dispatch_rules` is rendered with `str.format_map` before it is
-appended to the prompt.  Supported placeholders:
+`RULES.md` content is rendered with `str.format_map` before it is appended to
+the prompt.  Supported placeholders:
 
 | Placeholder | Value |
 |---|---|
@@ -118,12 +133,15 @@ placeholders.
 
 ### Fallback behaviour
 
-- If `dispatch_rules` is **absent** or **blank** (only whitespace), the
-  built-in `DEFAULT_DISPATCH_RULES` block is used.  Existing roles that do
-  not set this field continue to work identically.
-- Set a non-empty, non-whitespace string to fully replace the default block.
-  There is no "extend" mode — if you set `dispatch_rules` you own the entire
+- If `RULES.md` is **absent** or **blank** (only whitespace), the bundled
+  `shared/default_rules.md` is used.  Existing roles without a `RULES.md`
+  continue to work identically.
+- Create a non-empty `RULES.md` to fully replace the default block.
+  There is no "extend" mode — if you provide `RULES.md` you own the entire
   rules string.
+- To override the rules for a role you cannot modify upstream (e.g. a
+  third-party agent), create `.octobots/roles/<role>/RULES.md` in your
+  project — it takes priority over the installed agent's file.
 
 ## Agent Tool vs Taskbox
 
