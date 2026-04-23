@@ -102,6 +102,31 @@ def role_themes() -> dict[str, dict[str, str]]:
     return out
 
 
+def get_dispatch_rules(role: str) -> str | None:
+    """Return the content of a role's RULES.md, or None if absent/empty.
+
+    Resolution order:
+      1. ``.octobots/roles/<role>/RULES.md``  (project-local override)
+      2. ``.claude/agents/<role>/RULES.md``   (installed agent default)
+
+    Returns None when no RULES.md exists or its content is blank/whitespace.
+    The caller passes the result to ``render_dispatch_rules``; None causes the
+    supervisor to use the bundled ``DEFAULT_DISPATCH_RULES`` fallback.
+    """
+    runtime_dir = PROJECT_DIR / ".octobots"
+    local = runtime_dir / "roles" / role / "RULES.md"
+    installed = INSTALLED_AGENTS / role / "RULES.md"
+    for candidate in (local, installed):
+        if candidate.is_file():
+            try:
+                content = candidate.read_text(encoding="utf-8", errors="replace").strip()
+            except OSError:
+                continue
+            if content:
+                return content
+    return None
+
+
 def role_aliases() -> tuple[dict[str, str], dict[str, str]]:
     """Return (ROLE_ALIASES, ROLE_DISPLAY) built from installed agents."""
     aliases: dict[str, str] = {

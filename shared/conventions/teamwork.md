@@ -78,6 +78,71 @@ If you can't respond immediately (busy with another task), at least ack with: "R
 
 **Silence breaks the pipeline.** The sender doesn't know if you received the message, if you're working on it, or if you're stuck. Always respond.
 
+## Per-Role Dispatch Rules
+
+When the supervisor delivers a Taskbox message to a pane it appends a RULES
+block that tells the agent what to do after completing the work.  By default
+the block assumes a dev-workflow role: comment on the GitHub issue, ack via
+`relay.py`, notify via MCP.
+
+### RULES.md file
+
+Each agent directory can contain a `RULES.md` file alongside `AGENT.md`:
+
+```
+.claude/agents/<role>/
+├── AGENT.md       ← frontmatter: name, description, tools, theme …
+├── SOUL.md        ← optional personality/voice
+└── RULES.md       ← NEW: rules appended to every dispatched message
+```
+
+Worker-style roles (no shell access, no GitHub issues, ack via MCP tool)
+create a `RULES.md` to replace the default dev-workflow block:
+
+```
+RULES: You MUST respond to this message.
+
+Analyze the meal photo per the meal-analysis skill and call
+submit_meal_analysis with your results. Optionally call notify() when done.
+Ack is handled internally by submit_meal_analysis — you do not need to call
+relay.py.
+```
+
+### Resolution order
+
+The supervisor looks for `RULES.md` in this order:
+
+1. `.octobots/roles/<role>/RULES.md` — project-local override (beats installed)
+2. `.claude/agents/<role>/RULES.md` — installed agent default
+3. `shared/default_rules.md` in the octobots repo — bundled fallback
+4. Hardcoded string — last-resort fallback when the bundled file is absent
+
+### Placeholder substitution
+
+`RULES.md` content is rendered with `str.format_map` before it is appended to
+the prompt.  Supported placeholders:
+
+| Placeholder | Value |
+|---|---|
+| `{msg_id}` | The Taskbox message id |
+| `{octobots_dir}` | Absolute path to the octobots installation directory |
+
+Unknown placeholders are silently replaced with an empty string — your
+template will not raise an error if a future supervisor version adds new
+placeholders.
+
+### Fallback behaviour
+
+- If `RULES.md` is **absent** or **blank** (only whitespace), the bundled
+  `shared/default_rules.md` is used.  Existing roles without a `RULES.md`
+  continue to work identically.
+- Create a non-empty `RULES.md` to fully replace the default block.
+  There is no "extend" mode — if you provide `RULES.md` you own the entire
+  rules string.
+- To override the rules for a role you cannot modify upstream (e.g. a
+  third-party agent), create `.octobots/roles/<role>/RULES.md` in your
+  project — it takes priority over the installed agent's file.
+
 ## Agent Tool vs Taskbox
 
 The Agent tool spawns sub-agents in YOUR context window. Taskbox sends messages to
