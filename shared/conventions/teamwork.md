@@ -78,6 +78,53 @@ If you can't respond immediately (busy with another task), at least ack with: "R
 
 **Silence breaks the pipeline.** The sender doesn't know if you received the message, if you're working on it, or if you're stuck. Always respond.
 
+## Per-Role Dispatch Rules
+
+When the supervisor delivers a Taskbox message to a pane it appends a RULES
+block that tells the agent what to do after completing the work.  By default
+the block assumes a dev-workflow role: comment on the GitHub issue, ack via
+`relay.py`, notify via MCP.
+
+Worker-style roles (no shell access, no GitHub issues, ack via MCP tool) can
+override this by adding a `dispatch_rules:` field to their `AGENT.md`
+frontmatter:
+
+```yaml
+---
+name: vision-analyst
+description: >-
+  Analyze meal photos and submit nutritional data.
+dispatch_rules: |
+  Analyze the meal photo per the meal-analysis skill and call
+  submit_meal_analysis with your results. Optionally call notify() when done.
+  Ack is handled internally by submit_meal_analysis — you do not need to call
+  relay.py.
+---
+```
+
+### Placeholder substitution
+
+The value of `dispatch_rules` is rendered with `str.format_map` before it is
+appended to the prompt.  Supported placeholders:
+
+| Placeholder | Value |
+|---|---|
+| `{msg_id}` | The Taskbox message id |
+| `{octobots_dir}` | Absolute path to the octobots installation directory |
+
+Unknown placeholders are silently replaced with an empty string — your
+template will not raise an error if a future supervisor version adds new
+placeholders.
+
+### Fallback behaviour
+
+- If `dispatch_rules` is **absent** or **blank** (only whitespace), the
+  built-in `DEFAULT_DISPATCH_RULES` block is used.  Existing roles that do
+  not set this field continue to work identically.
+- Set a non-empty, non-whitespace string to fully replace the default block.
+  There is no "extend" mode — if you set `dispatch_rules` you own the entire
+  rules string.
+
 ## Agent Tool vs Taskbox
 
 The Agent tool spawns sub-agents in YOUR context window. Taskbox sends messages to

@@ -34,7 +34,7 @@ from rich import box
 
 from scheduler import JobStore, Scheduler, JobType, JobAction, parse_interval, format_interval
 from roles import ROLE_ALIASES, ROLE_DISPLAY, resolve_alias
-from agent_registry import role_themes
+from agent_registry import role_themes, get_dispatch_rules
 
 # ── Paths ───────────────────────────────────────────────────────────────────
 
@@ -57,6 +57,46 @@ EXCLUDED_ROLES = {"scout"}
 ROLE_THEME: dict[str, dict[str, str]] = role_themes()
 
 console = Console()
+
+# ── Dispatch rules ──────────────────────────────────────────────────────────
+
+# Default rules block for dev-workflow roles (GitHub issues + shell relay).
+# Supports {msg_id} and {octobots_dir} placeholders.
+DEFAULT_DISPATCH_RULES = (
+    "-- RULES: You MUST respond to this message. "
+    "If it is a task: do the work, then 1) comment on the GitHub issue, "
+    "2) run: python3 {octobots_dir}/skills/taskbox/scripts/relay.py ack {msg_id} \"your summary\", "
+    "3) call the `notify` MCP tool: notify(message=\"Done: summary\"). "
+    "If it is a question: answer via "
+    "python3 {octobots_dir}/skills/taskbox/scripts/relay.py ack {msg_id} \"your answer\". "
+    "NEVER ignore a message. Silence breaks the pipeline."
+)
+
+
+def render_dispatch_rules(
+    role_frontmatter: dict,
+    msg_id: str,
+    octobots_dir: str | Path,
+) -> str:
+    """Return the RULES block for a dispatched message.
+
+    If the role's frontmatter contains a non-empty ``dispatch_rules`` string,
+    that string is used.  Otherwise ``DEFAULT_DISPATCH_RULES`` is used.
+
+    Supported placeholders (resolved via ``str.format_map``):
+      - ``{msg_id}``       — the Taskbox message id
+      - ``{octobots_dir}`` — absolute path to the octobots directory
+
+    Unknown placeholders are silently replaced with an empty string so that
+    custom templates can evolve without breaking older supervisor builds.
+    """
+    from collections import defaultdict
+
+    custom = (role_frontmatter.get("dispatch_rules") or "").strip()
+    template = custom if custom else DEFAULT_DISPATCH_RULES
+
+    subs: dict = defaultdict(str, msg_id=str(msg_id), octobots_dir=str(octobots_dir))
+    return template.format_map(subs)
 
 
 # ── .env.octobots loader ────────────────────────────────────────────────────
@@ -1251,17 +1291,10 @@ class Supervisor:
             return
 
         # Build single-line task prompt
-        relay_cmd = f"python3 {RELAY_SCRIPT}"
+        role_fm = get_dispatch_rules(role)
+        rules_block = render_dispatch_rules(role_fm, msg_id, OCTOBOTS_DIR)
 
-        prompt = (
-            f"Message from {sender}: {content} "
-            f"-- RULES: You MUST respond to this message. "
-            f"If it is a task: do the work, then 1) comment on the GitHub issue, "
-            f"2) run: {relay_cmd} ack {msg_id} \"your summary\", "
-            f"3) call the `notify` MCP tool: notify(message=\"Done: summary\"). "
-            f"If it is a question: answer via {relay_cmd} ack {msg_id} \"your answer\". "
-            f"NEVER ignore a message. Silence breaks the pipeline."
-        )
+        prompt = f"Message from {sender}: {content} {rules_block}"
         self.tmux.send_keys(pane, prompt, confirm_paste=True)
         console.print(f"[green]→[/green] {role}: task from {sender} ({msg_id[:8]})")
 

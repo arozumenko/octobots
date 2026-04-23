@@ -102,6 +102,26 @@ def role_themes() -> dict[str, dict[str, str]]:
     return out
 
 
+def get_dispatch_rules(role: str) -> dict:
+    """Return the frontmatter dict for a role, used to resolve dispatch_rules.
+
+    Resolution order mirrors ``resolve_role`` in supervisor.py:
+      1. ``.octobots/roles/<role>/AGENT.md``   (project overrides)
+      2. ``.claude/agents/<role>/AGENT.md``    (installed agents)
+
+    Returns an empty dict when the role cannot be found.  The caller reads
+    ``result.get("dispatch_rules")``; the empty-dict fallback causes the
+    supervisor to use ``DEFAULT_DISPATCH_RULES``.
+    """
+    runtime_dir = PROJECT_DIR / ".octobots"
+    local = runtime_dir / "roles" / role / "AGENT.md"
+    installed = INSTALLED_AGENTS / role / "AGENT.md"
+    for candidate in (local, installed):
+        if candidate.is_file():
+            return _parse_frontmatter(candidate)
+    return {}
+
+
 def role_aliases() -> tuple[dict[str, str], dict[str, str]]:
     """Return (ROLE_ALIASES, ROLE_DISPLAY) built from installed agents."""
     aliases: dict[str, str] = {
