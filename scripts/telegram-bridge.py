@@ -680,6 +680,54 @@ async def run_bot() -> None:
         display = ", ".join(DISPLAY_NAMES.get(r, r) for r in targets)
         await send_telegram(context.bot, update.effective_chat.id, f"🔄 Restart requested: {display}")
 
+    # Claude Code slash commands forwarded verbatim (no "[User via Telegram]:" prefix).
+    # Registered as CommandHandlers because unregistered /commands are swallowed by filters.COMMAND.
+    _CC_PASSTHROUGH_COMMANDS = (
+        "model",
+        "effort",
+        "clear",
+        "compact",
+        "review",
+        "memory",
+    )
+
+    async def cmd_claude_passthrough(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not _auth(update):
+            return
+
+        # Strip @BotName suffix that Telegram appends in groups
+        command = update.message.text.split()[0].split("@")[0]
+
+        target_pane = DEFAULT_ROLE
+        target_label = label_for(DEFAULT_ROLE)
+        args = list(context.args or [])
+        if args and args[0].startswith("@"):
+            target_pane = resolve_alias(args[0][1:])
+            target_label = label_for(target_pane)
+            args = args[1:]
+
+        raw = f"{command} {' '.join(args)}".strip() if args else command
+
+        if not tmux_session_exists():
+            await send_telegram(
+                context.bot, update.effective_chat.id,
+                "Supervisor not running. Start with: <code>octobots/supervisor.sh</code>",
+            )
+            return
+
+        success = tmux_send(target_pane, raw)
+        if success:
+            logger.info("Telegram CC passthrough → %s: %s", target_pane, raw)
+            await send_telegram(
+                context.bot, update.effective_chat.id,
+                f"→ <b>{target_label}</b>  <code>{raw}</code>",
+            )
+        else:
+            await send_telegram(
+                context.bot, update.effective_chat.id,
+                f"Failed to reach <b>{target_label}</b> — pane not found.",
+            )
+
     # ── /help — full command reference ─────────────────────────────────
 
     async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -702,10 +750,21 @@ async def run_bot() -> None:
             "/jobs cancel|pause|resume <i>id</i>\n"
             "/schedule <i>type spec @role msg</i>\n"
             "/loop <i>interval @role msg</i>\n\n"
+            "<b>Claude Code passthrough</b>\n"
+            "These are forwarded verbatim to the worker's Claude Code session:\n"
+            "/model <i>model-name</i> — switch model (e.g. claude-opus-4-7)\n"
+            "/effort <i>level</i> — set effort (default/low/medium/high/max)\n"
+            "/clear — clear Claude Code context\n"
+            "/compact — compact context\n"
+            "/review — trigger code review\n"
+            "/memory — invoke memory skill\n"
+            "Prefix with <code>@role</code> to target a specific worker.\n\n"
             "<b>Examples</b>\n"
             "<code>/schedule every 30m @pm Check tasks</code>\n"
             "<code>/loop 5m run ./health-check.sh</code>\n"
-            "<code>/jobs cancel abc123</code>\n",
+            "<code>/jobs cancel abc123</code>\n"
+            "<code>/model claude-opus-4-7</code>\n"
+            "<code>/effort max</code>\n",
         )
 
     # ── Message handler — @role routing ────────────────────────────────
@@ -773,6 +832,23 @@ async def run_bot() -> None:
             if failed:
                 parts.append(f"Failed: {', '.join(failed)}")
             await send_telegram(context.bot, update.effective_chat.id, "\n".join(parts) if parts else "No workers running.")
+            return
+
+        # If text is a Claude Code slash command (e.g. @role /model ...), forward verbatim
+        cc_cmd = text.split()[0].lstrip("/") if text.startswith("/") else None
+        if cc_cmd and cc_cmd in _CC_PASSTHROUGH_COMMANDS:
+            success = tmux_send(target_pane, text)
+            if success:
+                logger.info("Telegram CC passthrough → %s: %s", target_pane, text[:80])
+                await send_telegram(
+                    context.bot, update.effective_chat.id,
+                    f"→ <b>{target_label}</b>  <code>{text}</code>",
+                )
+            else:
+                await send_telegram(
+                    context.bot, update.effective_chat.id,
+                    f"Failed to reach <b>{target_label}</b> — pane <code>{target_pane}</code> not found in tmux.",
+                )
             return
 
         # Send directly to the role's tmux pane
@@ -907,6 +983,9 @@ async def run_bot() -> None:
     app.add_handler(CommandHandler("loop", cmd_loop))
     app.add_handler(CommandHandler("restart", cmd_restart))
     app.add_handler(CommandHandler("help", cmd_help))
+    # Claude Code native slash commands — forwarded verbatim to the worker pane.
+    for _cc_cmd in _CC_PASSTHROUGH_COMMANDS:
+        app.add_handler(CommandHandler(_cc_cmd, cmd_claude_passthrough))
     # Attachment handler MUST be registered before text handler.
     # Photo-with-caption messages can match both filters.TEXT (via caption)
     # and filters.PHOTO. By registering attachments first, they get priority.
