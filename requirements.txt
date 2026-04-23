@@ -6,3 +6,11 @@ rich>=13.0                  # Supervisor TUI
 python-dotenv>=1.0          # .env.octobots loading
 cryptography>=41.0          # GitHub App JWT signing
 python-telegram-bot>=21.0   # Telegram bridge (optional)
+
+# Firebase bridge (optional) — install separately if using the Firebase bridge:
+# pip install firebase-admin>=6.5.0 google-cloud-firestore>=2.16.0 google-cloud-storage>=2.17.0 httpx>=0.27.0
+# The bridge lazy-imports firebase_admin etc., so `octobots` imports cleanly without these.
+
+# Test dependencies
+pytest>=8.0                 # Test runner
+pytest-asyncio>=0.23        # async test support
