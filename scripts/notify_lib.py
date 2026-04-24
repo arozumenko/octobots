@@ -199,13 +199,15 @@ def send_notification(
             )
         )
 
-    # Plain text path
-    if len(message) <= TEXT_LIMIT:
-        safe = html.escape(message)
+    # Plain text path — build full HTML first, then check length
+    safe_role = html.escape(role)
+    safe_msg = html.escape(message)
+    text = f"<b>[{safe_role}]</b> {safe_msg}"
+    if len(text) <= TEXT_LIMIT:
         payload = {
             "chat_id": chat,
             "parse_mode": "HTML",
-            "text": f"<b>[{role}]</b> {safe}",
+            "text": text,
         }
         return _ok(_post_json(token, "sendMessage", payload))
 
