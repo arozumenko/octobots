@@ -11,7 +11,7 @@ Install separately if using this bridge:
     pip install firebase-admin>=6.5.0 google-cloud-firestore>=2.16.0 \
                 google-cloud-storage>=2.17.0 httpx>=0.27.0
 
-Usage:
+Usage (single recipient — existing behavior):
     from octobots.bridges.firebase import Bridge
 
     bridge = Bridge(
@@ -27,11 +27,23 @@ Usage:
         payload_builder=my_payload_builder,
     )
     asyncio.run(bridge.run())
+
+Usage (recipient pool — parallel agent panes):
+    bridge = Bridge(
+        ...
+        taskbox_recipient_pool=["vision-analyst-1", "vision-analyst-2", "vision-analyst-3"],
+        ...
+    )
+
+    Jobs are routed deterministically by job_id using an md5-based hash so the
+    same job_id always maps to the same recipient — helpful for debugging and
+    retries. The distribution is round-robin across the pool.
 """
 from __future__ import annotations
 
 import asyncio
 import datetime
+import hashlib
 import json
 import logging
 import os
@@ -223,7 +235,8 @@ class Bridge:
         octobots_db: str,
         relay_script: str | Path,
         taskbox_sender: str = "firebase-bridge",
-        taskbox_recipient: str,
+        taskbox_recipient: str | None = None,
+        taskbox_recipient_pool: list[str] | None = None,
         # MCP IPC
         mcp_results_dir: str | Path,
         mcp_images_dir: str | Path,
@@ -237,6 +250,15 @@ class Bridge:
         stale_threshold_sec: int | None = None,
         mcp_result_timeout_sec: int = 300,
     ) -> None:
+        # Validate exactly one of taskbox_recipient or taskbox_recipient_pool.
+        # Check empty pool first (before the falsy-check) so we give a specific message.
+        if taskbox_recipient_pool is not None and len(taskbox_recipient_pool) == 0:
+            raise ValueError("taskbox_recipient_pool must contain at least one recipient")
+        if not taskbox_recipient and not taskbox_recipient_pool:
+            raise ValueError("Either taskbox_recipient or taskbox_recipient_pool must be set")
+        if taskbox_recipient and taskbox_recipient_pool:
+            raise ValueError("Specify either taskbox_recipient OR taskbox_recipient_pool, not both")
+
         self._sa_path = service_account_path
         self._storage_bucket = storage_bucket
         self._firebase_project_id = firebase_project_id
@@ -247,6 +269,7 @@ class Bridge:
         self._relay_script = Path(relay_script)
         self._taskbox_sender = taskbox_sender
         self._taskbox_recipient = taskbox_recipient
+        self._taskbox_recipient_pool = taskbox_recipient_pool
         self._mcp_results_dir = Path(mcp_results_dir)
         self._mcp_images_dir = Path(mcp_images_dir)
         self._mcp_jobs_dir = Path(mcp_jobs_dir)
@@ -256,6 +279,36 @@ class Bridge:
         self._heartbeat_interval_sec = heartbeat_interval_sec
         self._stale_threshold_sec = stale_threshold_sec
         self._mcp_result_timeout_sec = mcp_result_timeout_sec
+
+    # ------------------------------------------------------------------
+    # Recipient resolution
+    # ------------------------------------------------------------------
+
+    def _resolve_recipient(self, job_id: str) -> str:
+        """Return the Taskbox recipient for the given job_id.
+
+        If ``taskbox_recipient`` was set, always returns it (single-recipient
+        mode — no change from pre-pool behavior).
+
+        If ``taskbox_recipient_pool`` was set, uses a deterministic md5-based
+        hash so the same ``job_id`` always routes to the same pool member.
+        This is intentional: retries and debugging benefit from stable routing,
+        and the distribution is uniform across the pool.
+
+        Hash algorithm: ``int(md5(job_id.encode()).hexdigest()[:8], 16) % len(pool)``
+        — portable, process-restart-stable, and sign-safe (always non-negative).
+        """
+        if self._taskbox_recipient is not None:
+            return self._taskbox_recipient
+
+        pool = self._taskbox_recipient_pool  # type: ignore[assignment]
+        index = int(hashlib.md5(job_id.encode()).hexdigest()[:8], 16) % len(pool)
+        recipient = pool[index]
+        logger.info(
+            "Bridge dispatching jobId=%s -> %s (pool index %d of %d)",
+            job_id, recipient, index, len(pool),
+        )
+        return recipient
 
     # ------------------------------------------------------------------
     # Relay / Taskbox helpers
@@ -289,16 +342,18 @@ class Bridge:
         payload_dict = self._payload_builder(job_id, claimed_doc, local_image_path)
         payload = json.dumps(payload_dict)
 
+        recipient = self._resolve_recipient(job_id)
+
         response = self._relay([
             "send",
             "--from", self._taskbox_sender,
-            "--to", self._taskbox_recipient,
+            "--to", recipient,
             payload,
         ])
         msg_id: str = response["id"]
         logger.info(
-            "Taskbox enqueued jobId=%s msgId=%s workerId=%s",
-            job_id, msg_id, self._worker_id,
+            "Taskbox enqueued jobId=%s msgId=%s workerId=%s recipient=%s",
+            job_id, msg_id, self._worker_id, recipient,
         )
         return msg_id
 

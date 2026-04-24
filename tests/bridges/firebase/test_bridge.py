@@ -728,3 +728,158 @@ class TestLogTaskException:
 
         error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
         assert not error_records, f"Cancelled task must not produce ERROR: {error_records}"
+
+
+# ---------------------------------------------------------------------------
+# Tests: taskbox_recipient_pool
+# ---------------------------------------------------------------------------
+
+
+def _make_bridge_with_pool(
+    tmp_path: Path,
+    pool: list[str],
+) -> "Bridge":
+    from bridges.firebase.bridge import Bridge
+
+    def payload_builder(job_id: str, claimed_doc: dict, local_image_path: Path) -> dict:
+        return {"jobId": job_id, "kind": "test-job"}
+
+    return Bridge(
+        service_account_path="/fake/sa.json",
+        worker_id="test-worker",
+        worker_capabilities=["vision"],
+        octobots_db=str(tmp_path / "relay.db"),
+        relay_script=tmp_path / "relay.py",
+        taskbox_recipient_pool=pool,
+        mcp_results_dir=tmp_path / "mcp-results",
+        mcp_images_dir=tmp_path / "mcp-images",
+        mcp_jobs_dir=tmp_path / "mcp-jobs",
+        payload_builder=payload_builder,
+        mcp_result_timeout_sec=5,
+    )
+
+
+class TestRecipientPool:
+    def test_recipient_alone_works(self, tmp_path: Path) -> None:
+        """Bridge with taskbox_recipient (single) constructs without error."""
+        bridge = _make_bridge(tmp_path)
+        assert bridge._taskbox_recipient == "vision-analyst"
+        assert bridge._taskbox_recipient_pool is None
+
+    def test_recipient_pool_alone_works(self, tmp_path: Path) -> None:
+        """Bridge with taskbox_recipient_pool (no single recipient) constructs without error."""
+        pool = ["va-1", "va-2", "va-3"]
+        bridge = _make_bridge_with_pool(tmp_path, pool)
+        assert bridge._taskbox_recipient is None
+        assert bridge._taskbox_recipient_pool == pool
+
+    def test_neither_recipient_nor_pool_raises(self, tmp_path: Path) -> None:
+        """Bridge with neither param raises ValueError at construction."""
+        from bridges.firebase.bridge import Bridge
+
+        def pb(job_id: str, claimed_doc: dict, local_image_path: Path) -> dict:
+            return {}
+
+        with pytest.raises(ValueError, match="taskbox_recipient"):
+            Bridge(
+                service_account_path="/fake/sa.json",
+                worker_id="w",
+                worker_capabilities=["vision"],
+                octobots_db=str(tmp_path / "relay.db"),
+                relay_script=tmp_path / "relay.py",
+                mcp_results_dir=tmp_path / "r",
+                mcp_images_dir=tmp_path / "i",
+                mcp_jobs_dir=tmp_path / "j",
+                payload_builder=pb,
+            )
+
+    def test_both_recipient_and_pool_raises(self, tmp_path: Path) -> None:
+        """Passing both params raises ValueError at construction."""
+        from bridges.firebase.bridge import Bridge
+
+        def pb(job_id: str, claimed_doc: dict, local_image_path: Path) -> dict:
+            return {}
+
+        with pytest.raises(ValueError, match="not both"):
+            Bridge(
+                service_account_path="/fake/sa.json",
+                worker_id="w",
+                worker_capabilities=["vision"],
+                octobots_db=str(tmp_path / "relay.db"),
+                relay_script=tmp_path / "relay.py",
+                taskbox_recipient="va-1",
+                taskbox_recipient_pool=["va-1", "va-2"],
+                mcp_results_dir=tmp_path / "r",
+                mcp_images_dir=tmp_path / "i",
+                mcp_jobs_dir=tmp_path / "j",
+                payload_builder=pb,
+            )
+
+    def test_empty_pool_raises(self, tmp_path: Path) -> None:
+        """Empty pool list raises ValueError at construction."""
+        from bridges.firebase.bridge import Bridge
+
+        def pb(job_id: str, claimed_doc: dict, local_image_path: Path) -> dict:
+            return {}
+
+        with pytest.raises(ValueError, match="at least one recipient"):
+            Bridge(
+                service_account_path="/fake/sa.json",
+                worker_id="w",
+                worker_capabilities=["vision"],
+                octobots_db=str(tmp_path / "relay.db"),
+                relay_script=tmp_path / "relay.py",
+                taskbox_recipient_pool=[],
+                mcp_results_dir=tmp_path / "r",
+                mcp_images_dir=tmp_path / "i",
+                mcp_jobs_dir=tmp_path / "j",
+                payload_builder=pb,
+            )
+
+    def test_resolve_recipient_uses_md5_hash(self, tmp_path: Path) -> None:
+        """_resolve_recipient is deterministic across calls and Bridge instances."""
+        import hashlib
+        pool = ["va-1", "va-2", "va-3"]
+
+        bridge_a = _make_bridge_with_pool(tmp_path, pool)
+        bridge_b = _make_bridge_with_pool(tmp_path, pool)
+
+        job_ids = [f"job-{i}" for i in range(50)]
+
+        for job_id in job_ids:
+            r_a1 = bridge_a._resolve_recipient(job_id)
+            r_a2 = bridge_a._resolve_recipient(job_id)
+            r_b = bridge_b._resolve_recipient(job_id)
+
+            assert r_a1 == r_a2, f"Must be idempotent for {job_id}"
+            assert r_a1 == r_b, f"Must be deterministic across Bridge instances for {job_id}"
+
+            # Verify correct hash formula.
+            expected_index = int(hashlib.md5(job_id.encode()).hexdigest()[:8], 16) % len(pool)
+            assert r_a1 == pool[expected_index], (
+                f"Expected {pool[expected_index]} for {job_id}, got {r_a1}"
+            )
+
+    def test_recipient_pool_round_robins_deterministically(self, tmp_path: Path) -> None:
+        """Pool dispatch distributes across all members and is stable on repeated calls."""
+        pool = ["va-a", "va-b", "va-c"]
+        bridge = _make_bridge_with_pool(tmp_path, pool)
+
+        job_ids = [f"job-pool-{i}" for i in range(30)]
+        first_pass = {jid: bridge._resolve_recipient(jid) for jid in job_ids}
+        second_pass = {jid: bridge._resolve_recipient(jid) for jid in job_ids}
+
+        # Determinism: same result on second pass.
+        assert first_pass == second_pass, "Results must be identical on repeated calls"
+
+        # Distribution: all pool members are used at least once over 30 jobs.
+        recipients_used = set(first_pass.values())
+        assert recipients_used == set(pool), (
+            f"All pool members must be used; missing: {set(pool) - recipients_used}"
+        )
+
+    def test_single_recipient_resolve_unchanged(self, tmp_path: Path) -> None:
+        """When taskbox_recipient is set, _resolve_recipient always returns it."""
+        bridge = _make_bridge(tmp_path)  # uses taskbox_recipient="vision-analyst"
+        for job_id in ["job-1", "job-2", "job-abc", "completely-different"]:
+            assert bridge._resolve_recipient(job_id) == "vision-analyst"
