@@ -301,7 +301,8 @@ class Bridge:
         if self._taskbox_recipient is not None:
             return self._taskbox_recipient
 
-        pool = self._taskbox_recipient_pool  # type: ignore[assignment]
+        pool = self._taskbox_recipient_pool
+        assert pool is not None
         index = int(hashlib.md5(job_id.encode()).hexdigest()[:8], 16) % len(pool)
         recipient = pool[index]
         logger.info(

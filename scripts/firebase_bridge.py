@@ -135,12 +135,18 @@ def _load_config() -> dict[str, Any]:
 
     # Recipient resolution: pool wins when both are set (more user-friendly than raising).
     recipient_pool_raw = os.environ.get("BRIDGE_TASKBOX_RECIPIENT_POOL", "")
-    recipient_pool: list[str] | None = None
+    recipient_pool = (
+        [r.strip() for r in recipient_pool_raw.split(",") if r.strip()]
+        if recipient_pool_raw
+        else []
+    )
     taskbox_recipient: str | None = None
 
-    if recipient_pool_raw:
-        recipient_pool = [r.strip() for r in recipient_pool_raw.split(",") if r.strip()]
+    if recipient_pool:
+        # Pool mode: pass the parsed list; Bridge validates it is non-empty.
+        pass
     else:
+        recipient_pool = None  # type: ignore[assignment]
         taskbox_recipient = os.environ.get("BRIDGE_TASKBOX_RECIPIENT", "vision-analyst")
 
     return {
