@@ -12,6 +12,7 @@ so credential edits take effect without restart.
 
 from __future__ import annotations
 
+import html
 import json
 import mimetypes
 import os
@@ -200,10 +201,11 @@ def send_notification(
 
     # Plain text path
     if len(message) <= TEXT_LIMIT:
+        safe = html.escape(message)
         payload = {
             "chat_id": chat,
             "parse_mode": "HTML",
-            "text": f"<b>[{role}]</b> {message}",
+            "text": f"<b>[{role}]</b> {safe}",
         }
         return _ok(_post_json(token, "sendMessage", payload))
 
