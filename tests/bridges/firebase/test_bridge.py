@@ -836,46 +836,31 @@ class TestRecipientPool:
                 payload_builder=pb,
             )
 
-    def test_resolve_recipient_uses_md5_hash(self, tmp_path: Path) -> None:
-        """_resolve_recipient is deterministic across calls and Bridge instances."""
-        import hashlib
-        pool = ["va-1", "va-2", "va-3"]
+    def test_recipient_pool_distributes_evenly_via_counter(self, tmp_path: Path) -> None:
+        """Pool dispatch distributes jobs evenly via monotonic counter.
 
-        bridge_a = _make_bridge_with_pool(tmp_path, pool)
-        bridge_b = _make_bridge_with_pool(tmp_path, pool)
-
-        job_ids = [f"job-{i}" for i in range(50)]
-
-        for job_id in job_ids:
-            r_a1 = bridge_a._resolve_recipient(job_id)
-            r_a2 = bridge_a._resolve_recipient(job_id)
-            r_b = bridge_b._resolve_recipient(job_id)
-
-            assert r_a1 == r_a2, f"Must be idempotent for {job_id}"
-            assert r_a1 == r_b, f"Must be deterministic across Bridge instances for {job_id}"
-
-            # Verify correct hash formula.
-            expected_index = int(hashlib.md5(job_id.encode()).hexdigest()[:8], 16) % len(pool)
-            assert r_a1 == pool[expected_index], (
-                f"Expected {pool[expected_index]} for {job_id}, got {r_a1}"
-            )
-
-    def test_recipient_pool_round_robins_deterministically(self, tmp_path: Path) -> None:
-        """Pool dispatch distributes across all members and is stable on repeated calls."""
+        N jobs across M pool members → floor(N/M) or ceil(N/M) jobs per member.
+        Not a 'same jobId → same recipient' assertion — the counter advances
+        monotonically, so the same job_id routes differently on repeated calls.
+        """
         pool = ["va-a", "va-b", "va-c"]
         bridge = _make_bridge_with_pool(tmp_path, pool)
 
-        job_ids = [f"job-pool-{i}" for i in range(30)]
-        first_pass = {jid: bridge._resolve_recipient(jid) for jid in job_ids}
-        second_pass = {jid: bridge._resolve_recipient(jid) for jid in job_ids}
+        n_jobs = 30  # divisible by 3 for exact distribution
+        job_ids = [f"job-pool-{i}" for i in range(n_jobs)]
+        results = [bridge._resolve_recipient(jid) for jid in job_ids]
 
-        # Determinism: same result on second pass.
-        assert first_pass == second_pass, "Results must be identical on repeated calls"
+        # Each member gets exactly n_jobs // len(pool) jobs.
+        expected_per_member = n_jobs // len(pool)
+        for member in pool:
+            count = results.count(member)
+            assert count == expected_per_member, (
+                f"Expected {expected_per_member} jobs for {member!r}, got {count}"
+            )
 
-        # Distribution: all pool members are used at least once over 30 jobs.
-        recipients_used = set(first_pass.values())
-        assert recipients_used == set(pool), (
-            f"All pool members must be used; missing: {set(pool) - recipients_used}"
+        # All pool members are used.
+        assert set(results) == set(pool), (
+            f"All pool members must be used; missing: {set(pool) - set(results)}"
         )
 
     def test_single_recipient_resolve_unchanged(self, tmp_path: Path) -> None:
@@ -883,6 +868,53 @@ class TestRecipientPool:
         bridge = _make_bridge(tmp_path)  # uses taskbox_recipient="vision-analyst"
         for job_id in ["job-1", "job-2", "job-abc", "completely-different"]:
             assert bridge._resolve_recipient(job_id) == "vision-analyst"
+
+    def test_recipient_pool_perfect_distribution_at_small_n(self, tmp_path: Path) -> None:
+        """Counter-based dispatch gives perfect distribution at small N.
+
+        Pool of 2 → 10 jobs → 5 each.
+        Pool of 3 → 9 jobs → 3 each.
+        Pool of 4 → 12 jobs → 3 each.
+        """
+        cases = [
+            (["va-1", "va-2"], 10),
+            (["va-1", "va-2", "va-3"], 9),
+            (["va-1", "va-2", "va-3", "va-4"], 12),
+        ]
+        for pool, n_jobs in cases:
+            bridge = _make_bridge_with_pool(tmp_path, pool)
+            results = [bridge._resolve_recipient(f"job-{i}") for i in range(n_jobs)]
+            expected = n_jobs // len(pool)
+            for member in pool:
+                count = results.count(member)
+                assert count == expected, (
+                    f"Pool {pool!r}: expected {expected} jobs for {member!r}, got {count}"
+                )
+
+    def test_recipient_pool_counter_independent_per_bridge(self, tmp_path: Path) -> None:
+        """Each Bridge instance has its own dispatch counter — no shared global state."""
+        pool = ["va-1", "va-2", "va-3"]
+        bridge_a = _make_bridge_with_pool(tmp_path, pool)
+        bridge_b = _make_bridge_with_pool(tmp_path, pool)
+
+        # Advance bridge_a's counter by 2 before touching bridge_b.
+        bridge_a._resolve_recipient("job-a0")
+        bridge_a._resolve_recipient("job-a1")
+
+        # bridge_b's counter should still be at 0.
+        assert bridge_b._dispatch_counter == 0, (
+            "bridge_b counter must start at 0 regardless of bridge_a's state"
+        )
+        r_b0 = bridge_b._resolve_recipient("job-b0")
+        assert r_b0 == pool[0], (
+            f"bridge_b first dispatch must hit pool[0]={pool[0]!r}, got {r_b0!r}"
+        )
+
+        # bridge_a's counter is now 2; its next dispatch must be pool[2].
+        r_a2 = bridge_a._resolve_recipient("job-a2")
+        assert r_a2 == pool[2], (
+            f"bridge_a third dispatch must hit pool[2]={pool[2]!r}, got {r_a2!r}"
+        )
 
     def test_empty_pool_string_falls_back_to_single_recipient(
         self, tmp_path: Path, monkeypatch: Any
@@ -922,26 +954,35 @@ class TestRecipientPool:
     def test_pool_mode_logs_dispatch_info(
         self, tmp_path: Path, caplog: Any
     ) -> None:
-        """_resolve_recipient emits an INFO log in pool mode with the right format."""
+        """_resolve_recipient emits an INFO log in pool mode with incrementing index."""
         import logging
+        import re
 
         pool = ["va-pool-0", "va-pool-1", "va-pool-2"]
         bridge = _make_bridge_with_pool(tmp_path, pool)
 
-        job_id = "job-log-test"
+        # Dispatch two jobs and capture their log lines.
         with caplog.at_level(logging.INFO, logger="bridges.firebase.bridge"):
-            recipient = bridge._resolve_recipient(job_id)
+            r0 = bridge._resolve_recipient("job-log-0")
+            r1 = bridge._resolve_recipient("job-log-1")
 
         info_records = [r for r in caplog.records if r.levelno == logging.INFO]
-        assert info_records, "Expected at least one INFO log from _resolve_recipient in pool mode"
+        assert len(info_records) >= 2, "Expected at least two INFO logs (one per dispatch)"
 
-        combined = " ".join(r.getMessage() for r in info_records)
-        assert job_id in combined, f"Log must contain jobId={job_id!r}; got: {combined!r}"
-        assert recipient in combined, f"Log must contain recipient {recipient!r}; got: {combined!r}"
+        messages = [r.getMessage() for r in info_records]
 
-        # Verify the format matches "pool index N of M"
-        import re
-        pool_size = len(pool)
-        assert re.search(r"pool index \d+ of \d+", combined), (
-            f"Log must contain 'pool index N of M'; got: {combined!r}"
+        # First dispatch: index 0
+        assert any("job-log-0" in m for m in messages), "Log must contain first jobId"
+        assert any(re.search(r"pool index 0 of 3", m) for m in messages), (
+            "First dispatch must log 'pool index 0 of 3'"
         )
+
+        # Second dispatch: index 1
+        assert any("job-log-1" in m for m in messages), "Log must contain second jobId"
+        assert any(re.search(r"pool index 1 of 3", m) for m in messages), (
+            "Second dispatch must log 'pool index 1 of 3'"
+        )
+
+        # Recipients must be correct pool members.
+        assert r0 == pool[0]
+        assert r1 == pool[1]

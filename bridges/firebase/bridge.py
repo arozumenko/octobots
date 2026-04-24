@@ -35,15 +35,20 @@ Usage (recipient pool — parallel agent panes):
         ...
     )
 
-    Jobs are routed deterministically by job_id using an md5-based hash so the
-    same job_id always maps to the same recipient — helpful for debugging and
-    retries. The distribution is round-robin across the pool.
+    Pool dispatch strategy: monotonic counter (round-robin).
+    - Perfect distribution: N jobs across N pool members → 1 job each, no collisions.
+    - Not deterministic across restarts: the same job_id may route to a different pool
+      member after a Bridge restart. This is acceptable because:
+      1. Job re-claims after worker crashes already break determinism.
+      2. Even distribution is more important for parallel throughput.
+    - Not load-aware: assumes all pool members process jobs at similar rates.
+      For load-aware dispatch (querying Taskbox in-flight counts per recipient),
+      see Phase 8 (TBD).
 """
 from __future__ import annotations
 
 import asyncio
 import datetime
-import hashlib
 import json
 import logging
 import os
@@ -279,6 +284,7 @@ class Bridge:
         self._heartbeat_interval_sec = heartbeat_interval_sec
         self._stale_threshold_sec = stale_threshold_sec
         self._mcp_result_timeout_sec = mcp_result_timeout_sec
+        self._dispatch_counter = 0  # monotonic, used for pool round-robin
 
     # ------------------------------------------------------------------
     # Recipient resolution
@@ -290,24 +296,29 @@ class Bridge:
         If ``taskbox_recipient`` was set, always returns it (single-recipient
         mode — no change from pre-pool behavior).
 
-        If ``taskbox_recipient_pool`` was set, uses a deterministic md5-based
-        hash so the same ``job_id`` always routes to the same pool member.
-        This is intentional: retries and debugging benefit from stable routing,
-        and the distribution is uniform across the pool.
+        If ``taskbox_recipient_pool`` was set, uses a monotonic counter for
+        perfect round-robin distribution. Each call increments the counter so
+        N consecutive jobs spread evenly across N pool members with no collisions.
 
-        Hash algorithm: ``int(md5(job_id.encode()).hexdigest()[:8], 16) % len(pool)``
-        — portable, process-restart-stable, and sign-safe (always non-negative).
+        Dispatch strategy: monotonic counter (round-robin).
+        - Perfect distribution: N jobs across N pool members → 1 job each.
+        - Not deterministic across restarts: same job_id may route to a different
+          pool member after a Bridge restart. Acceptable because:
+          1. Job re-claims after worker crashes already break determinism.
+          2. Even distribution is more important for parallel throughput.
+        - Not load-aware: assumes all pool members process jobs at similar rates.
         """
         if self._taskbox_recipient is not None:
             return self._taskbox_recipient
 
-        pool = self._taskbox_recipient_pool
-        assert pool is not None
-        index = int(hashlib.md5(job_id.encode()).hexdigest()[:8], 16) % len(pool)
-        recipient = pool[index]
+        # Pool mode: monotonic round-robin for perfect distribution.
+        assert self._taskbox_recipient_pool is not None
+        idx = self._dispatch_counter % len(self._taskbox_recipient_pool)
+        self._dispatch_counter += 1
+        recipient = self._taskbox_recipient_pool[idx]
         logger.info(
             "Bridge dispatching jobId=%s -> %s (pool index %d of %d)",
-            job_id, recipient, index, len(pool),
+            job_id, recipient, idx, len(self._taskbox_recipient_pool),
         )
         return recipient
 
