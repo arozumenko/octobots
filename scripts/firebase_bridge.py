@@ -20,6 +20,13 @@ Environment variables:
                                      (default: vision,claude-code)
     BRIDGE_JOBS_COLLECTION         — Firestore collection name (default: jobs)
     BRIDGE_TASKBOX_RECIPIENT       — Taskbox recipient role (default: vision-analyst)
+                                     Mutually exclusive with BRIDGE_TASKBOX_RECIPIENT_POOL.
+    BRIDGE_TASKBOX_RECIPIENT_POOL  — Comma-separated list of recipient roles for
+                                     parallel dispatch, e.g. "va-1,va-2,va-3".
+                                     When set, takes precedence over
+                                     BRIDGE_TASKBOX_RECIPIENT. Jobs are routed
+                                     deterministically by job_id (md5 hash) so
+                                     the same job always goes to the same pane.
     BRIDGE_TASKBOX_SENDER          — Taskbox sender identity (default: firebase-bridge)
     BRIDGE_MCP_RESULTS_DIR         — directory for MCP result files
                                      (default: /tmp/octobots-mcp-results)
@@ -126,6 +133,22 @@ def _load_config() -> dict[str, Any]:
         str(_OCTOBOTS_DIR / ".octobots" / "relay.db"),
     )
 
+    # Recipient resolution: pool wins when both are set (more user-friendly than raising).
+    recipient_pool_raw = os.environ.get("BRIDGE_TASKBOX_RECIPIENT_POOL", "")
+    recipient_pool = (
+        [r.strip() for r in recipient_pool_raw.split(",") if r.strip()]
+        if recipient_pool_raw
+        else []
+    )
+    taskbox_recipient: str | None = None
+
+    if recipient_pool:
+        # Pool mode: pass the parsed list; Bridge validates it is non-empty.
+        pass
+    else:
+        recipient_pool = None  # type: ignore[assignment]
+        taskbox_recipient = os.environ.get("BRIDGE_TASKBOX_RECIPIENT", "vision-analyst")
+
     return {
         "sa_path": sa_path,
         "storage_bucket": os.environ.get("FIREBASE_STORAGE_BUCKET", ""),
@@ -134,7 +157,8 @@ def _load_config() -> dict[str, Any]:
         "worker_id": worker_id,
         "worker_capabilities": worker_capabilities,
         "octobots_db": octobots_db,
-        "taskbox_recipient": os.environ.get("BRIDGE_TASKBOX_RECIPIENT", "vision-analyst"),
+        "taskbox_recipient": taskbox_recipient,
+        "taskbox_recipient_pool": recipient_pool,
         "taskbox_sender": os.environ.get("BRIDGE_TASKBOX_SENDER", "firebase-bridge"),
         "mcp_results_dir": os.environ.get("BRIDGE_MCP_RESULTS_DIR", "/tmp/octobots-mcp-results"),
         "mcp_images_dir": os.environ.get("BRIDGE_MCP_IMAGES_DIR", "/tmp/octobots-images"),
@@ -185,7 +209,7 @@ def main(argv: list[str] | None = None) -> None:
 
     cfg = _load_config()
 
-    bridge = Bridge(
+    bridge_kwargs: dict[str, Any] = dict(
         service_account_path=cfg["sa_path"],
         storage_bucket=cfg["storage_bucket"],
         firebase_project_id=cfg["firebase_project_id"],
@@ -195,13 +219,18 @@ def main(argv: list[str] | None = None) -> None:
         octobots_db=cfg["octobots_db"],
         relay_script=RELAY_SCRIPT,
         taskbox_sender=cfg["taskbox_sender"],
-        taskbox_recipient=cfg["taskbox_recipient"],
         mcp_results_dir=cfg["mcp_results_dir"],
         mcp_images_dir=cfg["mcp_images_dir"],
         mcp_jobs_dir=cfg["mcp_jobs_dir"],
         payload_builder=_default_payload_builder,
         # No result_enricher by default — identity pass-through in Bridge
     )
+    if cfg["taskbox_recipient_pool"] is not None:
+        bridge_kwargs["taskbox_recipient_pool"] = cfg["taskbox_recipient_pool"]
+    else:
+        bridge_kwargs["taskbox_recipient"] = cfg["taskbox_recipient"]
+
+    bridge = Bridge(**bridge_kwargs)
 
     asyncio.run(bridge.run(dry_run=args.dry_run, once=args.once))
 
