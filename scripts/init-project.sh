@@ -350,6 +350,38 @@ echo ""
 echo "Seeding .claude/ (agents + skills)..."
 seed_claude_dir "$PROJECT_DIR"
 
+# ── Install status line ────────────────────────────────────────────────────
+# Shows usable context % with a progress bar in every worker's CLI.
+STATUSLINE_SRC="$OCTOBOTS_DIR/shared/statusline.sh"
+STATUSLINE_DST="$PROJECT_DIR/.claude/statusline.sh"
+if [[ -f "$STATUSLINE_SRC" ]]; then
+    cp "$STATUSLINE_SRC" "$STATUSLINE_DST"
+    chmod +x "$STATUSLINE_DST"
+
+    # Register in .claude/settings.json (create or merge)
+    SETTINGS="$PROJECT_DIR/.claude/settings.json"
+    if [[ -f "$SETTINGS" ]]; then
+        # Merge statusLine into existing settings
+        python3 -c "
+import json, sys
+s = json.load(open('$SETTINGS'))
+s['statusLine'] = {'type': 'command', 'command': '.claude/statusline.sh'}
+json.dump(s, open('$SETTINGS', 'w'), indent=2)
+print('  Status line: updated .claude/settings.json')
+"
+    else
+        cat > "$SETTINGS" << 'SEOF'
+{
+  "statusLine": {
+    "type": "command",
+    "command": ".claude/statusline.sh"
+  }
+}
+SEOF
+        echo "  Status line: created .claude/settings.json"
+    fi
+fi
+
 # ── Generate OCTOBOTS.md + CLAUDE.md for a worker ───────────────────────────
 # OCTOBOTS.md  — role-specific runtime config (worker ID, inbox, memory, skills)
 # CLAUDE.md    — @-imports shared conventions + OCTOBOTS.md so both are auto-loaded
