@@ -350,6 +350,63 @@ echo ""
 echo "Seeding .claude/ (agents + skills)..."
 seed_claude_dir "$PROJECT_DIR"
 
+# ── Install status line ────────────────────────────────────────────────────
+# Shows usable context % with a progress bar in every worker's CLI.
+STATUSLINE_SRC="$OCTOBOTS_DIR/shared/statusline.sh"
+STATUSLINE_DST="$PROJECT_DIR/.claude/statusline.sh"
+if [[ -f "$STATUSLINE_SRC" ]]; then
+    # Idempotent copy: only overwrite if missing or different. Preserves
+    # any user customisations to .claude/statusline.sh on re-run.
+    if [[ ! -f "$STATUSLINE_DST" ]] || ! cmp -s "$STATUSLINE_SRC" "$STATUSLINE_DST"; then
+        cp "$STATUSLINE_SRC" "$STATUSLINE_DST"
+        chmod +x "$STATUSLINE_DST"
+    fi
+
+    # Register in .claude/settings.json (create or merge).
+    SETTINGS="$PROJECT_DIR/.claude/settings.json"
+    mkdir -p "$(dirname "$SETTINGS")"
+    if [[ -f "$SETTINGS" ]]; then
+        # Pass path via argv (heredoc is single-quoted so no shell expansion).
+        # Backs up to .bak on parse error; skips if user already configured a
+        # custom statusLine; only writes when the value actually needs to change.
+        python3 - "$SETTINGS" <<'PY'
+import json, shutil, sys
+path = sys.argv[1]
+desired = {"type": "command", "command": ".claude/statusline.sh"}
+try:
+    with open(path) as f:
+        s = json.load(f)
+except json.JSONDecodeError as e:
+    shutil.copy(path, path + ".bak")
+    print(f"  Status line: existing {path} is invalid JSON ({e}); "
+          f"backed up to .bak and skipping merge", file=sys.stderr)
+    sys.exit(0)
+existing = s.get("statusLine")
+if existing == desired:
+    print("  Status line: .claude/settings.json already up to date")
+elif existing is not None:
+    print(f"  Status line: existing custom statusLine in {path} preserved "
+          f"(remove it manually if you want the framework default)",
+          file=sys.stderr)
+else:
+    s["statusLine"] = desired
+    with open(path, "w") as f:
+        json.dump(s, f, indent=2)
+    print("  Status line: updated .claude/settings.json")
+PY
+    else
+        cat > "$SETTINGS" << 'SEOF'
+{
+  "statusLine": {
+    "type": "command",
+    "command": ".claude/statusline.sh"
+  }
+}
+SEOF
+        echo "  Status line: created .claude/settings.json"
+    fi
+fi
+
 # ── Generate OCTOBOTS.md + CLAUDE.md for a worker ───────────────────────────
 # OCTOBOTS.md  — role-specific runtime config (worker ID, inbox, memory, skills)
 # CLAUDE.md    — @-imports shared conventions + OCTOBOTS.md so both are auto-loaded
