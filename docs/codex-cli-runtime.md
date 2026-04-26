@@ -1,0 +1,302 @@
+# Adding OpenAI Codex CLI as a third runtime
+
+> **Status: design spec — not yet implemented.** Files referenced below
+> (`scripts/sync-codex-agents.py`, `shared/codex-model-map.json`, the
+> supervisor `elif runtime == "codex":` branch) do not exist yet. See
+> "Implementation order" at the end for the build sequence. Don't follow
+> the opt-in instructions until those files land.
+
+Octobots supports Claude Code (default) and GitHub Copilot CLI (opt-in).
+This spec adds **Codex CLI** as a third runtime, so a team can mix all
+three — e.g. PM on Claude Opus, BA on Codex gpt-5.5, devs on Claude Sonnet.
+
+## How to opt a role into Codex CLI
+
+Add one line to that role's `AGENT.md` frontmatter:
+
+```yaml
+---
+name: ba
+description: Business analyst — turns vague asks into crisp user stories.
+runtime: codex            # ← this is the only required change
+model: gpt-5.5            # optional; defaults to o4-mini
+---
+```
+
+Both `octobots/start.sh ba` and `python3 octobots/scripts/supervisor.py`
+will detect `runtime: codex` and launch the role with
+`codex --model <model> --dangerously-bypass-approvals-and-sandbox` instead
+of `claude --agent ba --dangerously-skip-permissions`.
+
+## Architecture: what Codex CLI does differently
+
+Unlike Claude Code and Copilot CLI, Codex has **no `--agent` flag** and no
+named agent directories. Instead it uses:
+
+- **`AGENTS.md`** — project instructions loaded automatically from CWD
+  (walked root-to-CWD, concatenated). This is the equivalent of `CLAUDE.md`.
+- **Profiles** (`[profiles.<name>]` in `config.toml`) — set model, sandbox,
+  approval policy, but **cannot carry custom instructions**.
+- **`.codex/config.toml`** — MCP servers, exec policy, model settings.
+- **`.rules`** — Starlark-based exec policy files (equivalent of hooks).
+
+Because profiles cannot carry instructions, the translation strategy is:
+**write per-worker `AGENTS.md` files** (for role instructions) and use
+**CLI flags** (for model/permissions).
+
+## What happens under the hood
+
+### 1. Agent translation (`scripts/sync-codex-agents.py`)
+
+A new sync script reads the octobots `AGENT.md` + `SOUL.md` and writes
+Codex-native files into the worker's launch directory:
+
+**Input:**
+```
+.claude/agents/ba/
+├── AGENT.md    (frontmatter + technical instructions)
+└── SOUL.md     (personality, voice, working style)
+```
+
+**Output (written to worker launch dir):**
+```
+.octobots/workers/ba/
+├── AGENTS.md           ← combined instructions (AGENT.md body + SOUL.md)
+├── .codex/
+│   └── config.toml     ← MCP servers + runtime settings
+└── .rules              ← translated PreToolUse hooks (Starlark)
+```
+
+The script:
+- Strips Claude-only frontmatter fields (`color`, `workspace`, `skills`,
+  `allowedTools`) — preserved as comments for traceability.
+- Maps model names: Claude aliases (`sonnet`, `opus`, `haiku`) → OpenAI
+  equivalents via `shared/codex-model-map.json`. Unknown names pass through
+  so users can write `gpt-5.5`, `o4-mini`, etc. directly.
+- Prepends OCTOBOTS.md content (taskbox commands, notify instructions) into
+  the generated `AGENTS.md` so Codex workers get the same runtime config
+  as Claude workers.
+
+### 2. MCP translation (inside sync script)
+
+Reads the project's `.mcp.json` and writes `[mcp_servers]` blocks in
+`.codex/config.toml`. Same MCP tools regardless of runtime.
+
+**`.mcp.json` (Claude/Copilot format):**
+```json
+{
+  "mcpServers": {
+    "notify": {
+      "command": "/path/to/.venv/bin/python3",
+      "args": ["/path/to/octobots/mcp/notify/server.py"]
+    },
+    "playwright": {
+      "command": "npx",
+      "args": ["@playwright/mcp@latest"]
+    }
+  }
+}
+```
+
+**`.codex/config.toml` (generated):**
+```toml
+[mcp_servers.notify]
+command = "/path/to/.venv/bin/python3"
+args = ["/path/to/octobots/mcp/notify/server.py"]
+
+[mcp_servers.playwright]
+command = "npx"
+args = ["@playwright/mcp@latest"]
+```
+
+### 3. Hooks translation (inside sync script)
+
+Reads `.claude/hooks.json` PreToolUse entries and writes Codex `.rules`
+files using Starlark exec policy syntax.
+
+**`hooks.json` (Claude format):**
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "PushNotification",
+        "hooks": [{"type": "command", "command": "echo 'BLOCKED...' >&2; exit 2"}]
+      },
+      {
+        "matcher": "Agent",
+        "hooks": [{"type": "command", "command": "[ \"$OCTOBOTS_ID\" = 'project-manager' ] && exit 2 || exit 0"}]
+      }
+    ]
+  }
+}
+```
+
+**`.rules` (generated, pseudocode shown — real output must be valid Starlark):**
+```python
+# Pseudocode for illustration only. Codex `.rules` is a Starlark dialect:
+# no `import` statements (use `load(…)` if anything is loadable at all),
+# no docstrings, no Python stdlib. The sync script is responsible for
+# emitting syntactically valid Starlark; this snippet shows the intended
+# *behaviour* — review the actual implementation when the sync script lands.
+
+# Auto-generated by octobots sync-codex-agents.py — do not edit manually.
+
+def check_tool_call(tool_name, tool_input, env):
+    # PushNotification — blocked for all roles
+    if tool_name == "PushNotification":
+        return "forbidden"
+
+    # Agent — blocked for project-manager only
+    if tool_name == "Agent" and env.get("OCTOBOTS_ID") == "project-manager":
+        return "forbidden"
+
+    return "allow"
+```
+
+Note: Starlark `.rules` files are less expressive than shell-based hooks
+(no stderr feedback message to the model). The sync script maps `exit 2`
+(block) → `"forbidden"` and `exit 0` (allow) → `"allow"`. Conditional
+hooks (checking `$OCTOBOTS_ID`) are translated to Starlark conditionals
+that read from the environment exposed to the policy by the Codex runtime.
+
+### 4. Supervisor spawn branch
+
+New `elif runtime == "codex":` block in `supervisor.py`:
+
+```python
+elif runtime == "codex":
+    if not shutil.which("codex"):
+        console.print(f"[red]✗ {role}: codex binary not found (https://github.com/openai/codex)[/red]")
+        return
+    # Materialize AGENTS.md + .codex/config.toml + .rules
+    try:
+        subprocess.run(
+            ["python3", str(OCTOBOTS_DIR / "scripts" / "sync-codex-agents.py"),
+             str(role_dir), "--worker-dir", str(launch_dir),
+             "--mcp-json", str(PROJECT_DIR / ".mcp.json"),
+             "--hooks-json", str(PROJECT_DIR / ".claude" / "hooks.json")],
+            check=True, capture_output=True,
+        )
+    except subprocess.CalledProcessError as e:
+        console.print(f"[red]✗ {role}: codex agent sync failed: {e.stderr.decode().strip()}[/red]")
+        return
+
+    # Parse model from AGENT.md frontmatter (already mapped by sync script)
+    codex_model = _parse_frontmatter_field(role_dir, "model") or "o4-mini"
+    codex_model = _map_codex_model(codex_model)
+
+    agent_cmd = (
+        f"{gh_env}OCTOBOTS_ID={role} OCTOBOTS_DB={db_path} "
+        f"OPENAI_API_KEY=$OPENAI_API_KEY "
+        f"codex --model {codex_model} "
+        f"--dangerously-bypass-approvals-and-sandbox"
+    )
+```
+
+### 5. Authentication
+
+Codex CLI reads `OPENAI_API_KEY` from the environment. Add to
+`.env.octobots`:
+
+```bash
+OPENAI_API_KEY=sk-...    # required only if any role uses runtime: codex
+```
+
+The supervisor passes it through to the Codex process. No extra auth
+tooling needed (unlike Copilot which reuses `gh-token.py`).
+
+## Capability matrix
+
+| Concept | Claude Code | Copilot CLI | Codex CLI |
+|---|---|---|---|
+| Binary | `claude` | `copilot` | `codex` |
+| Auth | Anthropic OAuth | `GH_TOKEN` | `OPENAI_API_KEY` |
+| Skip approvals | `--dangerously-skip-permissions` | `--allow-all` | `--dangerously-bypass-approvals-and-sandbox` |
+| Agent loading | `--agent <name>` (from `.claude/agents/`) | `--agent <name>` (from `$COPILOT_HOME/agents/`) | `AGENTS.md` in CWD (auto-translated) |
+| Project instructions | `CLAUDE.md` | `AGENTS.md` | `AGENTS.md` (same file works) |
+| MCP config | `.mcp.json` | `.mcp.json` | `.codex/config.toml` (auto-translated) |
+| Hooks | `.claude/hooks.json` | `.claude/hooks.json` | `.rules` Starlark (auto-translated) |
+| Subagent (`Agent` tool) | built-in | not available | built-in (`[agents]` config) |
+| Model selection | in AGENT.md frontmatter | in AGENT.md frontmatter | `--model` CLI flag |
+| Context management | auto-compact (built-in) | auto-compact | auto-compact (`model_auto_compact_token_limit`) |
+
+## Same contract, different runtime
+
+These stay identical across all three runtimes:
+
+- **Env vars**: `OCTOBOTS_ID`, `OCTOBOTS_DB` set per worker
+- **Taskbox**: same SQLite DB, same `relay.py` commands
+- **Notify MCP**: same `mcp__notify__notify` (translated into native MCP config)
+- **Three-step completion**: issue comment → ack → notify
+- **Memory**: same `.agents/memory/<role>/` with snapshot regeneration
+- **Board**: same `.octobots/board.md`
+- **Status line**: the framework's Claude statusline (proposed in #23) reads `context_window.used_percentage` from Claude Code's stdin JSON contract — Claude-only by design. Codex TUI is Ratatui-based; whether it exposes a hook for a custom status line is an open question — see "Known gaps" below.
+
+## New files
+
+```
+octobots/
+├── scripts/
+│   └── sync-codex-agents.py        ← NEW: AGENT.md → AGENTS.md + config.toml + .rules
+├── shared/
+│   └── codex-model-map.json        ← NEW: claude alias → openai model mapping
+└── docs/
+    └── codex-cli-runtime.md        ← NEW: this document
+```
+
+## Model name mapping (`shared/codex-model-map.json`)
+
+```json
+{
+  "sonnet": "gpt-4.1",
+  "opus": "gpt-5.5",
+  "haiku": "o4-mini"
+}
+```
+
+Users can write OpenAI model names directly in AGENT.md (`model: gpt-5.5`)
+— unknown names pass through unchanged.
+
+## Out of scope (first version)
+
+- **Ollama-via-Codex** — Codex has `--oss` with `--local-provider ollama`
+  but the interaction model differs from Claude's ollama integration.
+- **Codex-specific context recycling** — Codex has its own auto-compact;
+  supervisor recycling (used for Ollama workers) is not needed initially.
+- **`codex exec` headless mode** — one-shot task execution. Could be
+  useful for lightweight roles but not needed for interactive parity.
+- **Status line** — Codex TUI is Ratatui-based; unclear if it supports
+  custom status line injection. Investigate separately (see "Known gaps").
+
+## Known gaps (read before assigning critical work to a Codex role)
+
+- **Status line parity** — once #23 lands, Claude workers see
+  `ctx [████░░░░░░] 42%` via the framework-provided statusline. Codex
+  workers won't get this until we determine whether Ratatui exposes a
+  hook for custom status lines. Operators steering a Codex role won't
+  see context-pressure warnings.
+- **Hook expressiveness regression** — Codex `.rules` (Starlark) cannot
+  emit a stderr message back to the model when a tool is blocked, only
+  `"forbidden"`. Claude/Copilot hooks use `exit 2` + stderr to nudge the
+  model toward an alternative action. Codex roles will see harder, more
+  opaque blocks.
+- **No SOUL.md round-trip** — Codex concatenates `AGENTS.md` from CWD
+  upward; if a worker `cd`s elsewhere mid-task, the persona file no
+  longer loads. Claude's `--agent` flag is sticky; Codex's isn't.
+- **Model name drift** — `shared/codex-model-map.json` is a static file.
+  When OpenAI ships new models we have to update it manually, or users
+  pass full OpenAI names directly.
+
+## Implementation order
+
+1. `shared/codex-model-map.json` — static mapping file
+2. `scripts/sync-codex-agents.py` — the core translation script
+   - Phase A: AGENT.md + SOUL.md → AGENTS.md
+   - Phase B: .mcp.json → .codex/config.toml
+   - Phase C: hooks.json → .rules
+3. `scripts/supervisor.py` — add `elif runtime == "codex":` spawn branch
+4. `start.sh` (at the framework root, invoked as `octobots/start.sh` from a project) — add codex support for single-role launch
+5. `scripts/check-spawn-ready.py` — add codex binary check
+6. `docs/codex-cli-runtime.md` — this document (already written)
+7. Test with one role (`runtime: codex`) in a mixed team
