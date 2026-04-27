@@ -670,10 +670,13 @@ class Supervisor:
         else:
             console.print("[dim]No GH tokens configured — using personal gh auth[/dim]")
 
-        # Requeue any interrupted tasks from previous run
-        requeued = self.taskbox.requeue_all_processing()
-        if requeued:
-            console.print(f"[yellow]↩ Requeued {requeued} interrupted task(s) → pending[/yellow]")
+        # Abandon (not requeue) any interrupted tasks from previous run.
+        # NutriSnap jobs are one-shot: the iOS Firestore listener is gone by the time
+        # the supervisor restarts, so redelivering the same task only floods workers
+        # with zombie jobs that nobody can consume. Abandon instead.
+        abandoned = self.taskbox.abandon_all()
+        if abandoned:
+            console.print(f"[yellow]↩ Abandoned {abandoned} interrupted task(s) — not requeued[/yellow]")
 
         # Show active task summary before launching workers
         active = self.taskbox.active_tasks()
