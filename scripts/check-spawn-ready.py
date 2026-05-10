@@ -143,7 +143,39 @@ def _extract_dict_block(text: str, dict_name: str) -> str:
 
 
 def parse_roles_py() -> tuple[dict[str, str], dict[str, str]]:
-    """Return (ROLE_ALIASES, ROLE_DISPLAY) from scripts/roles.py."""
+    """Return (ROLE_ALIASES, ROLE_DISPLAY), preferring agent_registry.role_aliases() and falling back to scripts/roles.py regex extraction.
+
+    Preferred path handles installs where ROLE_ALIASES is built dynamically
+    from agent frontmatter (e.g. ``ROLE_ALIASES, ROLE_DISPLAY = role_aliases()``)
+    rather than stored as a static dict literal.
+    """
+    # Preferred: dynamic import — works whether ROLE_ALIASES is a literal or
+    # the result of a function call.
+    scripts_dir = str(OCTOBOTS_DIR / "scripts")
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    try:
+        import importlib
+        ar = importlib.import_module("agent_registry")
+        aliases, display = ar.role_aliases()
+        # role_aliases() always seeds {"all","everyone","team"} (3 keys) and
+        # adds each agent name as an identity alias. Real persona aliases
+        # (e.g. "alex" → "ba") only land when frontmatter parsing succeeded —
+        # which silently degrades to {} when PyYAML isn't installed. Detect
+        # that case so the user gets the actionable "pip install pyyaml" hint
+        # instead of a misleading "persona aliases missing".
+        seeds = {"all", "everyone", "team"}
+        has_persona_alias = any(k != v for k, v in aliases.items() if k not in seeds)
+        if aliases and has_persona_alias:
+            return aliases, display
+    except (ImportError, ModuleNotFoundError, AttributeError) as e:
+        print(f"[check-spawn-ready] warn: agent_registry import failed "
+              f"({type(e).__name__}: {e}); falling back to regex extraction",
+              file=sys.stderr)
+
+    # Fallback: regex extraction for legacy installs predating dynamic
+    # role_aliases(). Remove once min sdlc-skills version guarantees the
+    # function-call assignment in scripts/roles.py.
     roles_py = OCTOBOTS_DIR / "scripts" / "roles.py"
     if not roles_py.exists():
         return {}, {}
@@ -277,7 +309,9 @@ def check_4_agent_symlinks(roles: list[str]) -> CheckResult:
 def check_5_role_aliases(roles: list[str]) -> CheckResult:
     aliases, _ = parse_roles_py()
     if not aliases:
-        return CheckResult(5, "roles.py aliases", FAIL, "could not parse scripts/roles.py", critical=True)
+        return CheckResult(5, "roles.py aliases", FAIL,
+                           "could not load ROLE_ALIASES (check `pip install pyyaml` and that .claude/agents/ is populated)",
+                           critical=True)
     personas = get_role_personas()
     missing = []
     for role_id, persona in personas.items():
