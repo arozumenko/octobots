@@ -851,8 +851,17 @@ async def run_bot() -> None:
                 )
             return
 
+        # Build forwarded message — include reply context if present so the
+        # worker can resolve pronoun-style replies ("yes", "rerun", "the other one")
+        # instead of guessing from session memory.
+        if reply_text:
+            quoted = re.sub(r"^\[[a-z][\w-]*\]\s*", "", reply_text, count=1).strip()
+            fwd_text = f"[User via Telegram] (reply to: \"{quoted}\"): {text}"
+        else:
+            fwd_text = f"[User via Telegram]: {text}"
+
         # Send directly to the role's tmux pane
-        success = tmux_send(target_pane, f"[User via Telegram]: {text}")
+        success = tmux_send(target_pane, fwd_text)
 
         if success:
             logger.info("Telegram → %s: %s", target_pane, text[:80])
@@ -946,13 +955,18 @@ async def run_bot() -> None:
 
         # Always tell the role where the file is saved so it can Read it.
         # For short text files, include a preview; for everything else, just the path.
+        reply_ctx = ""
+        if reply_text:
+            quoted = re.sub(r"^\[[a-z][\w-]*\]\s*", "", reply_text, count=1).strip()
+            reply_ctx = f" (reply to: \"{quoted}\")"
+
         if ext in text_extensions and local_path.stat().st_size < 2000:
             content = local_path.read_text(encoding="utf-8", errors="replace")
-            prompt = f"[User via Telegram] sent file '{filename}' (saved to {local_path}): {caption} -- Content: {content}"
+            prompt = f"[User via Telegram]{reply_ctx} sent file '{filename}' (saved to {local_path}): {caption} -- Content: {content}"
         elif ext in {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg"}:
-            prompt = f"[User via Telegram] sent image '{filename}' (saved to {local_path}): {caption} -- Use the Read tool on {local_path} to view it."
+            prompt = f"[User via Telegram]{reply_ctx} sent image '{filename}' (saved to {local_path}): {caption} -- Use the Read tool on {local_path} to view it."
         else:
-            prompt = f"[User via Telegram] sent file '{filename}' (saved to {local_path}): {caption} -- Use the Read tool on {local_path} to view it."
+            prompt = f"[User via Telegram]{reply_ctx} sent file '{filename}' (saved to {local_path}): {caption} -- Use the Read tool on {local_path} to view it."
 
         success = tmux_send(target_pane, prompt)
 
