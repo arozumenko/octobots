@@ -60,6 +60,17 @@ PROJECT_DIR = Path.cwd()
 RUNTIME_DIR = PROJECT_DIR / ".octobots"
 RELAY_SCRIPT = OCTOBOTS_DIR / "skills" / "taskbox" / "scripts" / "relay.py"
 
+# Appended to every inbound Telegram message so workers cannot assume their
+# pane is visible to the user. The bridge is one-way (user → worker via
+# tmux send-keys); worker → user only works through the `notify` MCP.
+# Without this directive, workers reply in-pane and the user sees silence.
+TG_REPLY_DIRECTIVE = (
+    "\n\n⚠️ This message is from a real Telegram user. They CANNOT see your "
+    "pane. You MUST reply by calling mcp__notify__notify(message=\"...\"). "
+    "Pane-only output = silence to the user. Capture the returned message_id "
+    "and quote it in any subsequent taskbox/board reference to this exchange."
+)
+
 
 def _check_env() -> None:
     if not TG_TOKEN:
@@ -820,7 +831,7 @@ async def run_bot() -> None:
             sent = []
             failed = []
             for role_name, _ in sorted(pane_map.items()):
-                if tmux_send(role_name, f"[User via Telegram to everyone]: {text}"):
+                if tmux_send(role_name, f"[User via Telegram to everyone]: {text}{TG_REPLY_DIRECTIVE}"):
                     display = DISPLAY_NAMES.get(role_name, role_name)
                     sent.append(display)
                 else:
@@ -852,7 +863,7 @@ async def run_bot() -> None:
             return
 
         # Send directly to the role's tmux pane
-        success = tmux_send(target_pane, f"[User via Telegram]: {text}")
+        success = tmux_send(target_pane, f"[User via Telegram]: {text}{TG_REPLY_DIRECTIVE}")
 
         if success:
             logger.info("Telegram → %s: %s", target_pane, text[:80])
@@ -954,7 +965,7 @@ async def run_bot() -> None:
         else:
             prompt = f"[User via Telegram] sent file '{filename}' (saved to {local_path}): {caption} -- Use the Read tool on {local_path} to view it."
 
-        success = tmux_send(target_pane, prompt)
+        success = tmux_send(target_pane, prompt + TG_REPLY_DIRECTIVE)
 
         if success:
             await send_telegram(
