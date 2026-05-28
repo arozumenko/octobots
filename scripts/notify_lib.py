@@ -186,6 +186,7 @@ def send_notification(
     message: str,
     file: Optional[str] = None,
     from_role: Optional[str] = None,
+    pre_formatted: bool = False,
 ) -> dict:
     """Send a Telegram notification to the user.
 
@@ -196,6 +197,9 @@ def send_notification(
             uploaded and the transport is chosen automatically from its
             extension (photo / voice / audio / document).
         from_role: Optional role badge override (defaults to $OCTOBOTS_ID).
+        pre_formatted: If True, treat ``message`` as already-valid HTML and
+            skip html.escape(). Use when you need bold/italic/links in the
+            notification body. The role badge is still HTML-escaped.
 
     Returns:
         dict with at least a "status" key: "sent", "skipped", or "error".
@@ -227,7 +231,7 @@ def send_notification(
 
     # Plain text path — build full HTML first, then check length
     safe_role = html.escape(role)
-    safe_msg = html.escape(message)
+    safe_msg = message if pre_formatted else html.escape(message)
     text = f"<b>[{safe_role}]</b> {safe_msg}"
     if len(text) <= TEXT_LIMIT:
         payload = {

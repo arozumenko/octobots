@@ -49,12 +49,15 @@ def notify(
     message: str,
     file: Optional[str] = None,
     from_role: Optional[str] = None,
+    pre_formatted: bool = True,
 ) -> dict:
     """Send a notification to the user via Telegram.
 
     Args:
         message: The text body. Always required. Used as the message body
             when no file is attached, or as the caption when one is.
+            HTML tags are supported: <b>bold</b>, <i>italic</i>,
+            <code>monospace</code>, <a href="...">link</a>.
         file: Optional path to a file on disk. When provided, the file is
             uploaded and the transport is chosen automatically from its
             extension:
@@ -63,6 +66,9 @@ def notify(
               - .mp3/.m4a/.aac/.flac/.wav  → audio player
               - anything else              → document (raw bytes preserved)
         from_role: Optional role badge override (defaults to $OCTOBOTS_ID).
+        pre_formatted: If True (default), treat message as already-valid HTML
+            and send as-is. Set to False to auto-escape raw plain text that
+            contains < > & characters not intended as HTML tags.
 
     Behavior:
         - No file, message ≤ 4000 chars → sendMessage (HTML-formatted).
@@ -70,7 +76,12 @@ def notify(
           file and sent as a document with a short preview as the caption.
         - With file → message is sent as the caption alongside the upload.
     """
-    return send_notification(message=message, file=file, from_role=from_role)
+    return send_notification(
+        message=message,
+        file=file,
+        from_role=from_role,
+        pre_formatted=pre_formatted,
+    )
 
 
 if __name__ == "__main__":
