@@ -72,7 +72,7 @@ venv/bin/python octobots/scripts/telegram-bridge.py
 ```
 /status              Worker states and last output
 /workers             Panes, sources (base/project), environments
-/tasks               Taskbox stats (pending/processing/done)
+/tasks [stats|clean|abandon]  List active tasks (stats: queue counts)
 /logs <role> [N]     Last N lines from a worker's pane
 /send <role> <msg>   Send a message directly to a worker
 /restart <role|all>  Exit + relaunch a worker
@@ -197,7 +197,7 @@ All supervisor commands are available as Telegram slash commands:
 | Command | Description |
 |---------|-------------|
 | `/status` | Worker states and last output |
-| `/tasks` | Taskbox queue stats |
+| `/tasks [stats\|clean\|abandon]` | List active tasks; `stats` shows queue counts |
 | `/team` | List roles and aliases |
 | `/logs <role>` | Last output from a worker |
 | `/board` | Team whiteboard |
