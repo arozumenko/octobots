@@ -14,6 +14,7 @@ import argparse
 import asyncio
 import json
 import os
+import shlex
 import shutil
 import sqlite3
 import subprocess
@@ -744,8 +745,33 @@ class Supervisor:
         console.print(f"[cyan]◆[/cyan] {label} → {launch_dir} [{env_label}]")
 
         db_path = RUNTIME_DIR / "relay.db"
+        # Paths/role identifiers are interpolated into a shell command line
+        # below, so shell-quote every token — PROJECT_DIR may contain spaces
+        # or quotes (e.g. macOS iCloud-synced
+        # "~/Library/Mobile Documents/.../Documents - Name").
+        db_path_q = shlex.quote(str(db_path))
+        role_q = shlex.quote(role)
+        source_role_q = shlex.quote(source_role)
         gh_token = self._resolve_gh_token(source_role)
-        gh_env = f"GH_TOKEN={gh_token} " if gh_token else ""
+        # Inject GH_TOKEN out-of-band via the tmux session environment
+        # instead of embedding it in the launch command: a literal token in
+        # the command string would leak into pane scrollback and the
+        # worker's `ps` listing. The pane reads it back through command
+        # substitution (captured, never echoed) so only the worker process
+        # environment ever holds the value.
+        if gh_token:
+            subprocess.run(
+                ["tmux", "set-environment", "-t", self.tmux.session,
+                 "GH_TOKEN", gh_token],
+                capture_output=True,
+            )
+            sess_q = shlex.quote(self.tmux.session)
+            gh_env = (
+                f'GH_TOKEN="$(tmux show-environment -t {sess_q} '
+                f'GH_TOKEN 2>/dev/null | cut -d= -f2-)" '
+            )
+        else:
+            gh_env = ""
         # NOTE: Do NOT pass OCTOBOTS_TG_TOKEN/OCTOBOTS_TG_OWNER here.
         # The notify MCP server (and notify_lib) reload .env.octobots fresh
         # on every call, so credential edits take effect immediately
@@ -840,19 +866,19 @@ class Supervisor:
                 # hangs). Disable it; we instead recycle the pane periodically
                 # via _recycle_ollama_workers().
                 agent_cmd = (
-                    f"{gh_env}OCTOBOTS_ID={role} OCTOBOTS_DB={db_path} "
+                    f"{gh_env}OCTOBOTS_ID={role_q} OCTOBOTS_DB={db_path_q} "
                     f"DISABLE_AUTO_COMPACT=1 CLAUDE_CODE_DISABLE_AUTO_COMPACT=1 "
-                    f"ollama launch claude --model {ollama_model} --yes -- "
-                    f"--agent '{source_role}' --dangerously-skip-permissions"
+                    f"ollama launch claude --model {shlex.quote(ollama_model)} --yes -- "
+                    f"--agent {source_role_q} --dangerously-skip-permissions"
                 )
             else:
                 if not shutil.which("claude"):
                     console.print(f"[red]✗ {role}: claude binary not found[/red]")
                     return
                 agent_cmd = (
-                    f"{gh_env}OCTOBOTS_ID={role} OCTOBOTS_DB={db_path} "
+                    f"{gh_env}OCTOBOTS_ID={role_q} OCTOBOTS_DB={db_path_q} "
                     f"CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1 "
-                    f"claude --agent '{source_role}' --dangerously-skip-permissions"
+                    f"claude --agent {source_role_q} --dangerously-skip-permissions"
                 )
         elif runtime == "copilot":
             if not shutil.which("copilot"):
@@ -868,8 +894,8 @@ class Supervisor:
                 console.print(f"[red]✗ {role}: copilot agent sync failed: {e.stderr.decode().strip()}[/red]")
                 return
             agent_cmd = (
-                f"{gh_env}OCTOBOTS_ID={role} OCTOBOTS_DB={db_path} "
-                f"copilot --agent '{source_role}' --allow-all"
+                f"{gh_env}OCTOBOTS_ID={role_q} OCTOBOTS_DB={db_path_q} "
+                f"copilot --agent {source_role_q} --allow-all"
             )
         else:
             console.print(f"[red]✗ {role}: unknown runtime '{runtime}' (expected claude|copilot)[/red]")
@@ -889,7 +915,7 @@ class Supervisor:
             console.print(f"[dim yellow]memory snapshot for {role} skipped: {e}[/dim yellow]")
 
         # cd + launch in one atomic command so the agent starts from launch_dir.
-        cmd = f"cd '{launch_dir}' && {agent_cmd}"
+        cmd = f"cd {shlex.quote(str(launch_dir))} && {agent_cmd}"
         self.tmux.send_keys(pane, cmd, confirm_paste=True)
         self.launched.add(role)
         time.sleep(3)
