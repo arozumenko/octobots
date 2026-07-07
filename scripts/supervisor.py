@@ -2003,7 +2003,7 @@ class Supervisor:
 
         console.print(table)
 
-    def cmd_tasks(self) -> None:
+    def cmd_tasks_stats(self) -> None:
         stats = self.taskbox.stats()
         if not stats:
             console.print("[dim]No taskbox activity.[/dim]")
@@ -2207,9 +2207,11 @@ class Supervisor:
         console.print(f"[yellow]Note: restart the worker(s) to load the new skill.[/yellow]")
 
     def cmd_tasks(self, args: list[str]) -> None:
-        sub = args[0] if args else "list"
+        sub = args[0].lower() if args else "list"
 
-        if sub == "clean":
+        if sub == "stats":
+            self.cmd_tasks_stats()
+        elif sub == "clean":
             # Requeue all processing → pending
             requeued = self.taskbox.requeue_all_processing()
             console.print(f"[yellow]↩ Requeued {requeued} processing task(s) → pending[/yellow]")
@@ -2861,7 +2863,7 @@ class Supervisor:
         cmds = [
             ("/status", "Worker states and last output"),
             ("/workers", "List panes, sources, environments"),
-            ("/tasks", "Taskbox stats"),
+            ("/tasks [stats|clean|abandon]", "List active tasks; stats: per-role counts; clean: requeue processing; abandon: drop all"),
             ("/logs <role> [N]", "Last N lines from a worker"),
             ("/send <role> <msg>", "Send a message to a worker's pane"),
             ("/restart <role|all>", "Restart a worker (exit + relaunch)"),
@@ -2872,7 +2874,6 @@ class Supervisor:
             ("/role remove <name>", "Stop role and remove its .octobots/workers/ dir (leaves .claude/agents/ intact)"),
             ("/role clone <source> [alias]", "Spawn a clone with its own isolated workspace"),
             ("/clear <role>", "Send /clear to a worker"),
-            ("/tasks [clean|abandon]", "List active tasks; clean requeues processing; abandon drops all"),
             ("/pause <role>", "Pause silence healthcheck (worker intentionally idle)"),
             ("/resume <role>", "Resume silence healthcheck manually"),
             ("/board", "Show team board"),
@@ -2905,7 +2906,7 @@ class Supervisor:
         elif cmd == "/workers":
             self.cmd_workers()
         elif cmd == "/tasks":
-            self.cmd_tasks()
+            self.cmd_tasks(args)
         elif cmd == "/logs":
             role = args[0] if args else ""
             lines = int(args[1]) if len(args) > 1 else 30
@@ -2929,8 +2930,6 @@ class Supervisor:
                 console.print("[red]Usage: /skill add <owner/repo[@ref]>  |  /skill <role|all> <skill>[/red]")
         elif cmd == "/role":
             self.cmd_role(args)
-        elif cmd == "/tasks":
-            self.cmd_tasks(args)
         elif cmd == "/clear":
             if args:
                 self.cmd_clear(args[0])
@@ -3020,8 +3019,13 @@ class Supervisor:
                     if not line.startswith("/"):
                         console.print("[dim]Type /help for commands, or prefix with / to run a command.[/dim]")
                         continue
-                    if not self.handle_command(line):
-                        break
+                    try:
+                        if not self.handle_command(line):
+                            break
+                    except Exception:
+                        # A buggy command handler must not take down the
+                        # supervisor (workers keep running, but the REPL dies).
+                        console.print_exception()
                 except (KeyboardInterrupt, EOFError):
                     break
         finally:

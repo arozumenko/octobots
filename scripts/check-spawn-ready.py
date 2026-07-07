@@ -277,13 +277,23 @@ def check_2_memory_files(roles: list[str]) -> CheckResult:
 def check_3_role_files(roles: list[str]) -> CheckResult:
     if not roles:
         return CheckResult(3, "role files", SKIP, "no roles configured", critical=True)
-    roles_dir = OCTOBOTS_DIR / "roles"
+    # Mirror supervisor.py resolve_role(): .octobots/roles/<role>/ (project
+    # overrides) first, then .claude/agents/<role>/ (installed agents).
+    # octobots/roles/ is no longer a role source.
+    search_dirs = (
+        PROJECT_DIR / ".octobots" / "roles",
+        PROJECT_DIR / ".claude" / "agents",
+    )
     missing = []
     for role_id in roles:
-        role_dir = roles_dir / role_id
-        if not (role_dir / "AGENT.md").exists():
+        role_dir = next(
+            (d / role_id for d in search_dirs if (d / role_id / "AGENT.md").is_file()),
+            None,
+        )
+        if role_dir is None:
             missing.append(f"{role_id}/AGENT.md")
-        if not (role_dir / "SOUL.md").exists():
+            continue
+        if not (role_dir / "SOUL.md").is_file():
             missing.append(f"{role_id}/SOUL.md")
     if missing:
         return CheckResult(3, "role files", FAIL, f"missing: {', '.join(missing)}", critical=True)

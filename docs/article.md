@@ -130,7 +130,7 @@ It provides an interactive command prompt with Rich formatting:
 ```
 octobots> /status       ← worker states + last output
 octobots> /health       ← system health check
-octobots> /tasks        ← taskbox queue stats
+octobots> /tasks        ← active tasks in the queue
 octobots> /logs py 20   ← last 20 lines from py's pane
 octobots> /bridge       ← start Telegram bridge
 octobots> /restart qa   ← relaunch QA
